@@ -1,0 +1,13 @@
+fastapi
+pydantic
+uvicorn
+python-multipart
+python-dotenv
+openai
+google-genai
+docling
+pandas
+openpyxl
+python-docx
+numpy
+faiss-cpu
