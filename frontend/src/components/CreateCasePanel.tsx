@@ -1,29 +1,43 @@
 import type { FormEvent } from "react";
 
 import type { DocumentRecord } from "../types";
+import { documentTypeLabels, languageLabels } from "../constants";
+import { formatDateTime } from "../utils/formatDateTime";
 
 type ExtractionInfo = {
   provider: string;
   model: string;
 } | null;
 
+function formatLanguage(value: DocumentRecord["language"]) {
+  if (!value) return "unknown";
+  return languageLabels[value] ?? value;
+}
+
+function formatDocumentType(value: DocumentRecord["document_type"]) {
+  if (!value) return "Untyped";
+  return documentTypeLabels[value] ?? value;
+}
+
+function formatFrozenState(doc: DocumentRecord) {
+  if (!doc.frozen) return null;
+  return doc.document_type === "procedure" ? "Frozen" : "Locked";
+}
+
 type CreateCasePanelProps = {
   title: string;
   notes: string;
   procedureDocs: DocumentRecord[];
   recordDocs: DocumentRecord[];
-  referenceDocs: DocumentRecord[];
   extractionInfoByDocument: Record<string, ExtractionInfo>;
   selectedProcedures: string[];
   selectedRecords: string[];
-  selectedReferences: string[];
   busy: string;
   onSubmit: (event: FormEvent) => void | Promise<void>;
   onTitleChange: (value: string) => void;
   onNotesChange: (value: string) => void;
   onSelectedProceduresChange: (value: string[]) => void;
   onSelectedRecordsChange: (value: string[]) => void;
-  onSelectedReferencesChange: (value: string[]) => void;
 };
 
 export function CreateCasePanel({
@@ -31,20 +45,22 @@ export function CreateCasePanel({
   notes,
   procedureDocs,
   recordDocs,
-  referenceDocs,
   extractionInfoByDocument,
   selectedProcedures,
   selectedRecords,
-  selectedReferences,
   busy,
   onSubmit,
   onTitleChange,
   onNotesChange,
   onSelectedProceduresChange,
   onSelectedRecordsChange,
-  onSelectedReferencesChange,
 }: CreateCasePanelProps) {
-  function renderDocumentWithExtraction(doc: DocumentRecord, checked: boolean, onToggle: (checked: boolean) => void) {
+    function renderDocumentWithExtraction(
+    doc: DocumentRecord,
+    checked: boolean,
+    onToggle: (checked: boolean) => void,
+    showExtraction: boolean,
+  ) {
     const extractionInfo = extractionInfoByDocument[doc.stored_filename];
 
     return (
@@ -55,13 +71,19 @@ export function CreateCasePanel({
             checked={checked}
             onChange={(e) => onToggle(e.target.checked)}
           />
-          <span>{doc.source_filename}</span>
+          <span className="document-option-copy">
+            <span className="document-option-heading">
+              <strong className="document-option-title">{doc.source_filename}</strong>
+              {formatFrozenState(doc) ? <span className="status-badge status-badge-frozen">{formatFrozenState(doc)}</span> : null}
+            </span>
+            <span className="document-option-meta">
+              {formatDocumentType(doc.document_type)} · {doc.group_id ?? "no-group"} · {formatLanguage(doc.language)}
+              {" · "}Created: {formatDateTime(doc.created_at)}
+              {showExtraction && extractionInfo ? ` · Extraction: ${extractionInfo.provider} · ${extractionInfo.model}` : ""}
+              {doc.frozen ? " · Edit protection enabled" : ""}
+            </span>
+          </span>
         </label>
-        {extractionInfo ? (
-          <p className="empty-state">
-            Extraction: {extractionInfo.provider} · {extractionInfo.model}
-          </p>
-        ) : null}
       </div>
     );
   }
@@ -78,7 +100,7 @@ export function CreateCasePanel({
           <span>Notes</span>
           <textarea value={notes} onChange={(e) => onNotesChange(e.target.value)} rows={4} />
         </label>
-        <div className="split-select">
+        <div className="split-select create-case-columns">
           <div>
             <h3>Procedure files</h3>
             {procedureDocs.map((doc) => (
@@ -91,49 +113,42 @@ export function CreateCasePanel({
                       ? [...selectedProcedures, doc.stored_filename]
                       : selectedProcedures.filter((item) => item !== doc.stored_filename),
                   ),
+                true,
               )
             ))}
           </div>
           <div>
             <h3>Record files</h3>
             {recordDocs.map((doc) => (
-              <label className="check" key={doc.stored_filename}>
-                <input
-                  type="checkbox"
-                  checked={selectedRecords.includes(doc.stored_filename)}
-                  onChange={(e) =>
-                    onSelectedRecordsChange(
-                      e.target.checked
-                        ? [...selectedRecords, doc.stored_filename]
-                        : selectedRecords.filter((item) => item !== doc.stored_filename),
-                    )
-                  }
-                />
-                <span>{doc.source_filename}</span>
-              </label>
+              <div key={doc.stored_filename}>
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={selectedRecords.includes(doc.stored_filename)}
+                    onChange={(e) =>
+                      onSelectedRecordsChange(
+                        e.target.checked
+                          ? [...selectedRecords, doc.stored_filename]
+                          : selectedRecords.filter((item) => item !== doc.stored_filename),
+                        )
+                      }
+                    />
+                  <span className="document-option-copy">
+                    <strong className="document-option-title">{doc.source_filename}</strong>
+                    <span className="document-option-meta">
+                      {formatDocumentType(doc.document_type)} · {doc.group_id ?? "no-group"} · {formatLanguage(doc.language)}
+                      {" · "}Created: {formatDateTime(doc.created_at)}
+                    </span>
+                  </span>
+                </label>
+              </div>
             ))}
             {recordDocs.length === 0 ? <p className="empty-state">No record files.</p> : null}
-          </div>
-          <div>
-            <h3>Reference files</h3>
-            {referenceDocs.map((doc) => (
-              renderDocumentWithExtraction(
-                doc,
-                selectedReferences.includes(doc.stored_filename),
-                (checked) =>
-                  onSelectedReferencesChange(
-                    checked
-                      ? [...selectedReferences, doc.stored_filename]
-                      : selectedReferences.filter((item) => item !== doc.stored_filename),
-                  ),
-              )
-            ))}
-            {referenceDocs.length === 0 ? <p className="empty-state">No reference files.</p> : null}
           </div>
         </div>
         <button
           className="button"
-          disabled={!title || selectedProcedures.length === 0 || selectedRecords.length === 0 || busy === "case"}
+          disabled={selectedProcedures.length === 0 || selectedRecords.length === 0 || busy === "case"}
         >
           {busy === "case" ? "Creating..." : "Create case"}
         </button>

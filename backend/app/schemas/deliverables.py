@@ -4,8 +4,6 @@ from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
-
-DeliverableExtractionMethod = Literal["non_rag", "simple_rag", "nested_rag"]
 RequirementType = Literal[
     "document_output",
     "recorded_information",
@@ -20,7 +18,6 @@ RequirementType = Literal[
 class DeliverableExtractionRequest(BaseModel):
     provider: str
     model: str = "gpt-5.4-nano"
-    method: DeliverableExtractionMethod = "non_rag"
     instructions: str | None = None
 
 
@@ -86,7 +83,6 @@ class DeliverableExtractionResponse(BaseModel):
     )
     prompt_version: str = "deliverable_extraction_v2"
     parser_version: str = "unknown"
-    method: DeliverableExtractionMethod = "non_rag"
     created_at: str
     saved_at: str
     deliverables: list[DeliverableItem] = Field(default_factory=list)
@@ -109,5 +105,4 @@ class DeliverableExtractionSummary(BaseModel):
     )
     prompt_version: str = "deliverable_extraction_v2"
     parser_version: str = "unknown"
-    method: DeliverableExtractionMethod = "non_rag"
     deliverable_count: int = 0

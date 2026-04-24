@@ -18,18 +18,25 @@ def extract_json_object(raw_text: str) -> dict:
         cleaned = "\n".join(lines).strip()
 
     start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1 or end < start:
+    if start == -1:
         raise ValueError("No JSON object found in LLM response.")
 
-    json_text = cleaned[start : end + 1]
+    json_text = cleaned[start:]
     try:
-        return json.loads(json_text)
+        decoder = json.JSONDecoder()
+        payload, _ = decoder.raw_decode(json_text)
+        if not isinstance(payload, dict):
+            raise ValueError("Top-level JSON value is not an object.")
+        return payload
     except json.JSONDecodeError as exc:
         repaired = _repair_json_text(json_text)
         if repaired != json_text:
             try:
-                return json.loads(repaired)
+                decoder = json.JSONDecoder()
+                payload, _ = decoder.raw_decode(repaired)
+                if not isinstance(payload, dict):
+                    raise ValueError("Top-level JSON value is not an object.")
+                return payload
             except json.JSONDecodeError:
                 pass
         raise ValueError(f"Failed to decode JSON from LLM response: {exc}") from exc

@@ -7,12 +7,16 @@ from typing import Any
 from uuid import uuid4
 
 from app.schemas.deliverables import (
-    DeliverableExtractionMethod,
     DeliverableExtractionResponse,
     DeliverableItem,
     RequirementType,
 )
-from app.services.document_service import DELIVERABLES_DIR, current_timestamp
+from app.services.document_service import current_timestamp
+from app.services.storage_paths import (
+    get_case_compliance_dir,
+    get_procedure_document_extraction_history_dir,
+    get_procedure_document_extraction_latest_path,
+)
 
 PROMPT_VERSION = "deliverable_extraction_v3_single_call"
 
@@ -74,29 +78,31 @@ def build_deliverable_result_path(
     document_content_hash: str | None = None,
     extraction_provider: str | None = None,
     extraction_model: str | None = None,
-    method: DeliverableExtractionMethod | None = None,
 ) -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if case_id:
         filename = f"case_{case_id}_deliverables_{timestamp}_{uuid4().hex}.json"
-    elif document_content_hash and extraction_provider and extraction_model and method:
+        return get_case_compliance_dir(case_id) / filename
+    if (
+        document_content_hash
+        and document_stored_filename
+        and extraction_provider
+        and extraction_model
+    ):
         provider_slug = _slugify_filename_part(extraction_provider)
         model_slug = _slugify_filename_part(extraction_model)
-        filename = (
-            f"document_{document_content_hash}_{provider_slug}_{model_slug}_{method}"
-            f"_deliverables_{timestamp}_{uuid4().hex}.json"
-        )
-    elif document_stored_filename:
+        filename = f"{timestamp}_{provider_slug}_{model_slug}_{uuid4().hex}.json"
+        return get_procedure_document_extraction_history_dir(document_content_hash, document_stored_filename) / filename
+    if document_stored_filename:
         filename = f"document_{document_stored_filename}_deliverables_{timestamp}_{uuid4().hex}.json"
     else:
         filename = f"deliverables_{scope_id}_{timestamp}_{uuid4().hex}.json"
-    return DELIVERABLES_DIR / filename
+    return get_case_compliance_dir(scope_id) / filename
 
 
 def save_deliverable_extraction_response(
     *,
     scope_id: str,
-    method: DeliverableExtractionMethod,
     deliverables: list[DeliverableItem],
     extraction_provider: str,
     extraction_model: str,
@@ -113,7 +119,6 @@ def save_deliverable_extraction_response(
         document_content_hash=document_content_hash,
         extraction_provider=extraction_provider,
         extraction_model=extraction_model,
-        method=method,
     )
     created_at = current_timestamp()
     response = DeliverableExtractionResponse(
@@ -124,7 +129,6 @@ def save_deliverable_extraction_response(
         extraction_model=extraction_model,
         prompt_version=PROMPT_VERSION,
         parser_version=parser_version,
-        method=method,
         created_at=created_at,
         saved_at=saved_path.as_posix(),
         deliverables=deliverables,
@@ -133,6 +137,12 @@ def save_deliverable_extraction_response(
         response.model_dump_json(indent=2, exclude_none=True),
         encoding="utf-8",
     )
+    if document_content_hash and document_stored_filename and not case_id:
+        latest_path = get_procedure_document_extraction_latest_path(document_content_hash, document_stored_filename)
+        latest_path.write_text(
+            response.model_dump_json(indent=2, exclude_none=True),
+            encoding="utf-8",
+        )
     return response
 
 

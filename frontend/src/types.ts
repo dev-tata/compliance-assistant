@@ -24,6 +24,7 @@ export type DocumentRecord = {
   group_id: string | null;
   parsed_json_at: string | null;
   content_hash: string | null;
+  frozen: boolean;
 };
 
 export type CaseRecord = {
@@ -61,10 +62,11 @@ export type ComplianceSummary = {
   model: string;
   method: ComplianceMethod;
   overall_assessment: string;
+  completion_percent: number;
+  reference_stored_filenames: string[];
 };
 
-export type ComplianceMethod = "non_rag" | "simple_rag" | "nested_rag";
-export type DeliverableExtractionMethod = "non_rag" | "simple_rag" | "nested_rag";
+export type ComplianceMethod = "non_rag" | "single_source_rag" | "multi_source_rag";
 
 export type ComplianceStatus = "satisfied" | "partial" | "not_satisfied";
 
@@ -80,13 +82,16 @@ export type ComplianceFinding = {
 
 export type ComplianceLinkedRow = {
   requirement: string;
+  requirement_ref?: string;
   status: ComplianceStatus;
   gap: string;
   recommendation: string;
+  record_recall_at_k?: number | null;
 };
 
 export type ComplianceAnalysis = {
   overall_assessment: string;
+  completion_percent: number;
   gaps: string[];
   linked_rows: ComplianceLinkedRow[];
   findings: ComplianceFinding[];
@@ -95,10 +100,8 @@ export type ComplianceAnalysis = {
 };
 
 export type ComplianceScores = {
-  m1_binary_rule_score: number;
   m2_ordinal_score: number;
   m3_evidence_weighted_score: number;
-  m4_confidence_aware_score: number;
   m5_grounding_score: number;
 };
 
@@ -113,6 +116,13 @@ export type SectionMatch = {
   match_basis: string;
 };
 
+export type RetrievalMetrics = {
+  record_recall_at_k: number | null;
+  record_k: number | null;
+  evaluated_requirements: number;
+  hit_requirements: number;
+};
+
 export type ComplianceResponse = {
   case_id: string;
   compliance_provider: string;
@@ -120,11 +130,13 @@ export type ComplianceResponse = {
   extraction_provider?: string | null;
   extraction_model?: string | null;
   method: ComplianceMethod;
+  reference_stored_filenames: string[];
   created_at: string;
   saved_at: string;
   analysis: ComplianceAnalysis;
   scores: ComplianceScores;
   section_matches: SectionMatch[];
+  retrieval_metrics?: RetrievalMetrics | null;
 };
 
 export type DeliverableItem = {
@@ -154,7 +166,6 @@ export type DeliverableExtractionResponse = {
   extraction_model: string;
   prompt_version?: string;
   parser_version?: string;
-  method: DeliverableExtractionMethod;
   created_at: string;
   saved_at: string;
   deliverables: DeliverableItem[];

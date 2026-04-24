@@ -49,3 +49,5 @@ class ComplianceSummary(BaseModel):
     model: str
     method: str = "non_rag"
     overall_assessment: str
+    completion_percent: int = Field(default=0, ge=0, le=100)
+    reference_stored_filenames: list[str] = Field(default_factory=list)

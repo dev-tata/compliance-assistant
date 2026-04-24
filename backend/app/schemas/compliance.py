@@ -6,7 +6,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 ComplianceStatus = Literal["satisfied", "partial", "not_satisfied"]
-ComplianceMethod = Literal["non_rag", "simple_rag", "nested_rag"]
+ComplianceMethod = Literal["non_rag", "single_source_rag", "multi_source_rag"]
 ComplianceRequirementSource = Literal["auto", "procedure_sections", "deliverables"]
 
 class ComplianceRequest(BaseModel):
@@ -14,9 +14,25 @@ class ComplianceRequest(BaseModel):
     model: str
     method: ComplianceMethod = "non_rag"
     instructions: str | None = None
-    requirement_source: ComplianceRequirementSource = "auto"
+    requirement_source: ComplianceRequirementSource = "deliverables"
     deliverable_file_name: str | None = None
     selected_deliverables_by_document: dict[str, list[str]] = Field(default_factory=dict)
+    additional_document_filenames: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def normalize_requirement_source(self) -> "ComplianceRequest":
+        if self.method in {"non_rag", "single_source_rag", "multi_source_rag"}:
+            self.requirement_source = "deliverables"
+        return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_method_names(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        data["method"] = _normalize_compliance_method(data.get("method"))
+        return data
 
 
 class ComplianceFinding(BaseModel):
@@ -45,6 +61,7 @@ class ComplianceLinkedRow(BaseModel):
     status: ComplianceStatus
     gap: str = ""
     recommendation: str = ""
+    record_recall_at_k: float | None = Field(default=None, ge=0.0, le=1.0)
 
     @model_validator(mode="before")
     @classmethod
@@ -58,6 +75,7 @@ class ComplianceLinkedRow(BaseModel):
 
 class ComplianceAnalysis(BaseModel):
     overall_assessment: str
+    completion_percent: int = Field(default=0, ge=0, le=100)
     gaps: list[str] = Field(default_factory=list)
     linked_rows: list[ComplianceLinkedRow] = Field(default_factory=list)
     findings: list[ComplianceFinding] = Field(default_factory=list)
@@ -93,10 +111,8 @@ class ComplianceAnalysis(BaseModel):
 
 
 class ComplianceScores(BaseModel):
-    m1_binary_rule_score: float
     m2_ordinal_score: float
     m3_evidence_weighted_score: float
-    m4_confidence_aware_score: float
     m5_grounding_score: float
 
 
@@ -109,6 +125,13 @@ class SectionMatch(BaseModel):
     record_heading_title: str | None = None
     match_percent: float = Field(ge=0.0, le=100.0)
     match_basis: str
+
+
+class RetrievalMetrics(BaseModel):
+    record_recall_at_k: float | None = Field(default=None, ge=0.0, le=1.0)
+    record_k: int | None = Field(default=None, ge=1)
+    evaluated_requirements: int = Field(default=0, ge=0)
+    hit_requirements: int = Field(default=0, ge=0)
 
 
 class ComplianceResponse(BaseModel):
@@ -126,15 +149,35 @@ class ComplianceResponse(BaseModel):
     extraction_provider: str | None = None
     extraction_model: str | None = None
     method: ComplianceMethod = "non_rag"
+    reference_stored_filenames: list[str] = Field(default_factory=list)
     created_at: str
     saved_at: str
     analysis: ComplianceAnalysis
     scores: ComplianceScores
     section_matches: list[SectionMatch] = Field(default_factory=list)
+    retrieval_metrics: RetrievalMetrics | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_method_names(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        data["method"] = _normalize_compliance_method(data.get("method"))
+        return data
 
 
 def _normalize_status_value(value: object) -> str:
     return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _normalize_compliance_method(value: object) -> str:
+    normalized = _normalize_status_value(value)
+    alias_map = {
+        "simple_rag": "single_source_rag",
+        "nested_rag": "multi_source_rag",
+    }
+    return alias_map.get(normalized, normalized)
 
 
 def _normalize_compliance_status(value: object) -> str:

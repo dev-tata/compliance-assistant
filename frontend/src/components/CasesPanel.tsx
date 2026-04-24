@@ -25,6 +25,7 @@ export function CasesPanel({
   onShowDocuments,
   onDeleteCase,
 }: CasesPanelProps) {
+  
   return (
     <section className="panel">
       <h2>Cases</h2>
@@ -32,12 +33,12 @@ export function CasesPanel({
         {cases.map((item) => (
           <article className={`list-item case-item ${selectedCaseId === item.case_id ? "active" : ""}`} key={item.case_id}>
             <div className="case-row">
-              <div className="case-select">
-                <strong>{item.title}</strong>
-                <span>
+              <div className="case-select document-option-copy">
+                <strong className="document-option-title">{item.title}</strong>
+                <span className="document-option-meta">
                   {item.procedure_stored_filenames.length} procedures · {item.record_stored_filenames.length} records · {item.reference_stored_filenames.length} references
                 </span>
-                <span>Created: {formatDateTime(item.created_at)}</span>
+                <span className="document-option-meta">Created: {formatDateTime(item.created_at)}</span>
               </div>
               <div className="actions">
                 <button
@@ -60,12 +61,14 @@ export function CasesPanel({
                     <ul className="inline-doc-list">
                       {caseDocuments.procedure_documents.map((doc) => (
                         <li key={doc.stored_filename}>
-                          <span>{doc.source_filename}</span>
-                          {extractionInfoByDocument[doc.stored_filename] ? (
-                            <div className="empty-state">
-                              Extraction: {extractionInfoByDocument[doc.stored_filename]?.provider} · {extractionInfoByDocument[doc.stored_filename]?.model}
-                            </div>
-                          ) : null}
+                          <span className="document-option-copy">
+                            <strong className="document-option-title">{doc.source_filename}</strong>
+                            {extractionInfoByDocument[doc.stored_filename] ? (
+                              <span className="document-option-meta">
+                                Extraction: {extractionInfoByDocument[doc.stored_filename]?.provider} · {extractionInfoByDocument[doc.stored_filename]?.model}
+                              </span>
+                            ) : null}
+                          </span>
                         </li>
                       ))}
                     </ul>
@@ -78,7 +81,11 @@ export function CasesPanel({
                   {caseDocuments.record_documents.length > 0 ? (
                     <ul className="inline-doc-list">
                       {caseDocuments.record_documents.map((doc) => (
-                        <li key={doc.stored_filename}>{doc.source_filename}</li>
+                        <li key={doc.stored_filename}>
+                          <span className="document-option-copy">
+                            <strong className="document-option-title">{doc.source_filename}</strong>
+                          </span>
+                        </li>
                       ))}
                     </ul>
                   ) : (
@@ -90,7 +97,11 @@ export function CasesPanel({
                   {caseDocuments.reference_documents.length > 0 ? (
                     <ul className="inline-doc-list">
                       {caseDocuments.reference_documents.map((doc) => (
-                        <li key={doc.stored_filename}>{doc.source_filename}</li>
+                        <li key={doc.stored_filename}>
+                          <span className="document-option-copy">
+                            <strong className="document-option-title">{doc.source_filename}</strong>
+                          </span>
+                        </li>
                       ))}
                     </ul>
                   ) : (

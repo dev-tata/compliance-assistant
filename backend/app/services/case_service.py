@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.schemas.cases import CaseDocuments, CaseRecord, ComplianceSummary, ParsedCase
-from app.schemas.compliance import ComplianceResponse
+from app.schemas.compliance import ComplianceFinding, ComplianceResponse
 from app.schemas.deliverables import (
     DeliverableExtractionRequest,
     DeliverableExtractionResponse,
@@ -18,8 +18,6 @@ from app.schemas.documents import DocumentRecord
 from app.schemas.parsing import ParsedDocument
 from app.services.deliverable_extraction_service import run_document_deliverable_extraction
 from app.services.document_service import (
-    COMPLIANCE_DIR,
-    DELIVERABLES_DIR,
     current_timestamp,
     find_document_or_404,
     get_document_extraction_payload,
@@ -27,11 +25,13 @@ from app.services.document_service import (
     get_or_parse_document,
     load_document_registry,
 )
+from app.services.compliance_methods.compliance_method_common import (
+    compute_completion_percent,
+    compute_overall_assessment_from_findings,
+)
+from app.services.storage_paths import CASES_DIR, CASE_REGISTRY_PATH, get_case_compliance_dir, write_case_manifest
 
-STORAGE_DIR = Path("storage")
-CASE_REGISTRY_PATH = STORAGE_DIR / "case_registry.json"
-
-STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+CASES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_case_registry() -> list[dict]:
@@ -39,7 +39,7 @@ def load_case_registry() -> list[dict]:
         return []
 
     try:
-        with open(CASE_REGISTRY_PATH, "r", encoding="utf-8") as file:
+        with open(CASE_REGISTRY_PATH, "r", encoding="utf-8-sig") as file:
             registry = json.load(file)
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Case registry corrupted")
@@ -80,6 +80,8 @@ def load_case_registry() -> list[dict]:
 def save_case_registry(registry: list[dict]) -> None:
     with open(CASE_REGISTRY_PATH, "w", encoding="utf-8") as file:
         json.dump(registry, file, indent=2, ensure_ascii=False)
+    for item in registry:
+        write_case_manifest(item)
 
 
 def get_case_or_404(case_id: str) -> dict:
@@ -154,6 +156,7 @@ def get_case_compliance_payload(case_id: str) -> dict[str, Any]:
             "stored_filename": document.stored_filename,
             "group_id": document.group_id,
             "language": document.language.value if document.language else None,
+            "content_hash": document.content_hash,
             "parsed_json": parsed_payload,
         }
 
@@ -179,6 +182,7 @@ def get_case_compliance_payload(case_id: str) -> dict[str, Any]:
 def list_case_deliverables(case_id: str) -> list[DeliverableExtractionSummary]:
     get_case_or_404(case_id)
     return _load_deliverable_summaries(
+        directory=get_case_compliance_dir(case_id),
         pattern=f"case_{case_id}_deliverables_*.json",
         fallback_case_id=case_id,
     )
@@ -187,7 +191,7 @@ def list_case_deliverables(case_id: str) -> list[DeliverableExtractionSummary]:
 def get_case_deliverable_result(case_id: str, file_name: str) -> DeliverableExtractionResponse:
     get_case_or_404(case_id)
 
-    path = DELIVERABLES_DIR / file_name
+    path = get_case_compliance_dir(case_id) / file_name
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Deliverable extraction result not found")
     if not path.name.startswith(f"case_{case_id}_deliverables_"):
@@ -200,14 +204,13 @@ def get_case_deliverable_result(case_id: str, file_name: str) -> DeliverableExtr
 
     payload.setdefault("created_at", _timestamp_from_path(path))
     payload.setdefault("saved_at", path.as_posix())
-    payload.setdefault("method", "non_rag")
     return DeliverableExtractionResponse(**payload)
 
 
 def delete_case_deliverable_result(case_id: str, file_name: str) -> DeliverableExtractionSummary:
     get_case_or_404(case_id)
 
-    path = DELIVERABLES_DIR / file_name
+    path = get_case_compliance_dir(case_id) / file_name
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Deliverable extraction result not found")
     if not path.name.startswith(f"case_{case_id}_deliverables_"):
@@ -241,7 +244,6 @@ def get_case_procedure_deliverables_payload(case_id: str) -> dict[str, Any] | No
     combined_deliverables: list[dict[str, Any]] = []
     extraction_provider: str | None = None
     extraction_model: str | None = None
-    method: str | None = None
 
     for stored_filename in case.procedure_stored_filenames:
         try:
@@ -254,8 +256,6 @@ def get_case_procedure_deliverables_payload(case_id: str) -> dict[str, Any] | No
             extraction_provider = result.extraction_provider
         if extraction_model is None:
             extraction_model = result.extraction_model
-        if method is None:
-            method = result.method
         combined_deliverables.extend(
             item.model_dump()
             for item in result.deliverables
@@ -265,7 +265,6 @@ def get_case_procedure_deliverables_payload(case_id: str) -> dict[str, Any] | No
         "case_id": case.case_id,
         "extraction_provider": extraction_provider or "unknown",
         "extraction_model": extraction_model or "unknown",
-        "method": method or "non_rag",
         "deliverables": combined_deliverables,
     }
 
@@ -284,7 +283,6 @@ def ensure_case_procedure_deliverables_payload(
     request = DeliverableExtractionRequest(
         provider=provider,
         model=model,
-        method="non_rag",
     )
 
     for stored_filename in case.procedure_stored_filenames:
@@ -303,24 +301,29 @@ def ensure_case_procedure_deliverables_payload(
         "case_id": case.case_id,
         "provider": provider,
         "model": model,
-        "method": "non_rag",
         "deliverables": combined_deliverables,
     }
 
 
 def list_case_compliances(case_id: str) -> list[ComplianceSummary]:
     get_case_or_404(case_id)
-    return _load_compliance_summaries(pattern=f"case_{case_id}_compliance_*.json", fallback_case_id=case_id)
+    return _load_compliance_summaries(
+        paths=sorted(get_case_compliance_dir(case_id).glob(f"case_{case_id}_compliance_*.json"), reverse=True),
+        fallback_case_id=case_id,
+    )
 
 
 def list_all_compliances() -> list[ComplianceSummary]:
-    return _load_compliance_summaries(pattern="case_*_compliance_*.json", fallback_case_id="")
+    return _load_compliance_summaries(
+        paths=sorted(CASES_DIR.glob("*/compliance/case_*_compliance_*.json"), reverse=True),
+        fallback_case_id="",
+    )
 
 
 def get_case_compliance_result(case_id: str, file_name: str) -> ComplianceResponse:
     get_case_or_404(case_id)
 
-    path = COMPLIANCE_DIR / file_name
+    path = get_case_compliance_dir(case_id) / file_name
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Compliance result not found")
     if not path.name.startswith(f"case_{case_id}_compliance_"):
@@ -333,7 +336,7 @@ def get_case_compliance_result(case_id: str, file_name: str) -> ComplianceRespon
 
     payload.setdefault("created_at", _timestamp_from_path(path))
     payload.setdefault("saved_at", path.as_posix())
-    payload.setdefault("method", "non_rag")
+    payload["analysis"] = _normalize_compliance_analysis_payload(payload.get("analysis", {}))
 
     return ComplianceResponse(**payload)
 
@@ -341,7 +344,7 @@ def get_case_compliance_result(case_id: str, file_name: str) -> ComplianceRespon
 def delete_case_compliance_result(case_id: str, file_name: str) -> ComplianceSummary:
     get_case_or_404(case_id)
 
-    path = COMPLIANCE_DIR / file_name
+    path = get_case_compliance_dir(case_id) / file_name
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Compliance result not found")
     if not path.name.startswith(f"case_{case_id}_compliance_"):
@@ -355,9 +358,9 @@ def delete_case_compliance_result(case_id: str, file_name: str) -> ComplianceSum
     return summary
 
 
-def _load_deliverable_summaries(*, pattern: str, fallback_case_id: str) -> list[DeliverableExtractionSummary]:
+def _load_deliverable_summaries(*, directory: Path, pattern: str, fallback_case_id: str) -> list[DeliverableExtractionSummary]:
     summaries: list[DeliverableExtractionSummary] = []
-    for path in sorted(DELIVERABLES_DIR.glob(pattern), reverse=True):
+    for path in sorted(directory.glob(pattern), reverse=True):
         summary = _load_deliverable_summary(path, fallback_case_id=fallback_case_id)
         if summary is not None:
             summaries.append(summary)
@@ -381,14 +384,13 @@ def _load_deliverable_summary(
         saved_at=payload.get("saved_at", path.as_posix()),
         extraction_provider=payload.get("extraction_provider", payload.get("provider", "unknown")),
         extraction_model=payload.get("extraction_model", payload.get("model", "unknown")),
-        method=payload.get("method", "non_rag"),
         deliverable_count=len(payload.get("deliverables", [])),
     )
 
 
-def _load_compliance_summaries(*, pattern: str, fallback_case_id: str) -> list[ComplianceSummary]:
+def _load_compliance_summaries(*, paths: list[Path], fallback_case_id: str) -> list[ComplianceSummary]:
     summaries: list[ComplianceSummary] = []
-    for path in sorted(COMPLIANCE_DIR.glob(pattern), reverse=True):
+    for path in paths:
         summary = _load_compliance_summary(path, fallback_case_id=fallback_case_id)
         if summary is not None:
             summaries.append(summary)
@@ -401,6 +403,8 @@ def _load_compliance_summary(path: Path, *, fallback_case_id: str) -> Compliance
     except json.JSONDecodeError:
         return None
 
+    analysis_payload = _normalize_compliance_analysis_payload(payload.get("analysis", {}))
+
     return ComplianceSummary(
         case_id=payload.get("case_id", fallback_case_id),
         file_name=path.name,
@@ -409,12 +413,30 @@ def _load_compliance_summary(path: Path, *, fallback_case_id: str) -> Compliance
         provider=payload.get("compliance_provider", payload.get("provider", "unknown")),
         model=payload.get("compliance_model", payload.get("model", "unknown")),
         method=payload.get("method", "non_rag"),
-        overall_assessment=payload.get("analysis", {}).get("overall_assessment", "unknown"),
+        overall_assessment=analysis_payload.get("overall_assessment", "unknown"),
+        completion_percent=analysis_payload.get("completion_percent", 0),
+        reference_stored_filenames=payload.get("reference_stored_filenames", []),
     )
 
 
 def _timestamp_from_path(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+
+
+def _normalize_compliance_analysis_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"overall_assessment": "Completed_0_20", "completion_percent": 0}
+
+    normalized = dict(payload)
+    findings_payload = normalized.get("procedure_to_record") or normalized.get("findings") or []
+    findings = [
+        ComplianceFinding(**item)
+        for item in findings_payload
+        if isinstance(item, dict)
+    ]
+    normalized["completion_percent"] = compute_completion_percent(findings)
+    normalized["overall_assessment"] = compute_overall_assessment_from_findings(findings)
+    return normalized
 
 
 def _parse_documents(

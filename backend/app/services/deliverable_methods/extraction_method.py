@@ -22,7 +22,7 @@ from app.services.llm.errors import LLMGenerationError
 from app.services.llm.factory import get_llm_service
 from app.services.llm.json_utils import extract_json_object
 
-def run_non_rag_deliverable_extraction(
+def run_llm_deliverable_extraction(
     *,
     scope_id: str,
     case_payload: dict[str, Any],
@@ -33,7 +33,7 @@ def run_non_rag_deliverable_extraction(
 ):
     print(
         f"[EXTRACT] started scope_id={scope_id} provider={request.provider} "
-        f"model={request.model} method={request.method}",
+        f"model={request.model} mode=llm",
         flush=True,
     )
     llm_service = get_llm_service(request.provider, request.model)
@@ -70,7 +70,6 @@ def run_non_rag_deliverable_extraction(
 
     return save_deliverable_extraction_response(
         scope_id=scope_id,
-        method="non_rag",
         deliverables=normalized_deliverables,
         extraction_provider=request.provider,
         extraction_model=request.model,

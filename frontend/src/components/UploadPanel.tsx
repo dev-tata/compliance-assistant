@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 
 import { documentTypeLabels, documentTypes, languageLabels, languages } from "../constants";
 import type { DocumentLanguage, DocumentType, LLMProviderDescriptor } from "../types";
+import { getModelOptions } from "../utils/llmModelOptions";
 
 type UploadPanelProps = {
   uploadFile: File | null;
@@ -44,8 +45,9 @@ export function UploadPanel({
   onGroupIdChange,
 }: UploadPanelProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const extractionEnabled = uploadType === "procedure" || uploadType === "reference";
-  const extractionTargetLabel = uploadType === "reference" ? "reference" : "procedure";
+  const extractionEnabled = uploadType === "procedure";
+  const extractionTargetLabel = "procedure";
+  const extractionModelOptions = getModelOptions(extractionProvider, extractionModel);
 
   useEffect(() => {
     if (!uploadFile && fileInputRef.current) {
@@ -71,40 +73,47 @@ export function UploadPanel({
             {documentTypes.map((type) => <option key={type} value={type}>{documentTypeLabels[type]}</option>)}
           </select>
         </label>
-        <div className={`field field-inline ${extractionEnabled ? "" : "field-disabled"}`}>
-          <span>Extraction</span>
-          <div className="check">
-            <input
-              type="checkbox"
-              checked={extractionEnabled && extractOnUpload}
-              disabled={!extractionEnabled}
-              onChange={(e) => onExtractOnUploadChange(e.target.checked)}
-            />
-            <span>Run extraction after upload for {extractionTargetLabel} files</span>
-          </div>
-        </div>
-        <div className="row">
-          <label className={`field ${extractionEnabled ? "" : "field-disabled"}`}>
-            <span>Extraction provider</span>
-            <select
-              value={extractionProvider}
-              disabled={!extractionEnabled || !extractOnUpload}
-              onChange={(e) => onExtractionProviderChange(e.target.value)}
-            >
-              {providers.map((item) => (
-                <option key={item.key} value={item.key}>{item.label}</option>
-              ))}
-            </select>
-          </label>
-          <label className={`field ${extractionEnabled ? "" : "field-disabled"}`}>
-            <span>Extraction model</span>
-            <input
-              value={extractionModel}
-              disabled={!extractionEnabled || !extractOnUpload}
-              onChange={(e) => onExtractionModelChange(e.target.value)}
-            />
-          </label>
-        </div>
+        {extractionEnabled ? (
+          <>
+            <div className="field field-inline">
+              <span>Extraction</span>
+              <div className="check">
+                <input
+                  type="checkbox"
+                  checked={extractOnUpload}
+                  onChange={(e) => onExtractOnUploadChange(e.target.checked)}
+                />
+                <span>Run extraction after upload for {extractionTargetLabel} files</span>
+              </div>
+            </div>
+            <div className="row">
+            <label className="field">
+              <span>Extraction provider</span>
+              <select
+                value={extractionProvider}
+                disabled={!extractOnUpload}
+                onChange={(e) => onExtractionProviderChange(e.target.value)}
+              >
+                {providers.map((item) => (
+                  <option key={item.key} value={item.key}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>Extraction model</span>
+              <select
+                value={extractionModel}
+                disabled={!extractOnUpload}
+                onChange={(e) => onExtractionModelChange(e.target.value)}
+              >
+                {extractionModelOptions.map((item) => (
+                  <option key={item} value={item}>{item}</option>
+                ))}
+              </select>
+            </label>
+            </div>
+          </>
+        ) : null}
         <label className="field">
           <span>Language</span>
           <select value={uploadLanguage} onChange={(e) => onLanguageChange(e.target.value as DocumentLanguage)}>

@@ -46,20 +46,24 @@ type ExtractionInfo = {
 type DocumentsPanelProps = {
   documents: DocumentRecord[];
   extractionInfoByDocument: Record<string, ExtractionInfo>;
+  busy: string;
   onRefresh: () => void;
   onParseDocument: (storedFilename: string) => void;
   onViewOriginal: (storedFilename: string) => void;
   onCheckRequirements: (storedFilename: string) => void;
+  onToggleProcedureFreeze: (storedFilename: string, frozen: boolean) => void;
   onDeleteDocument: (storedFilename: string) => void;
 };
 
 export function DocumentsPanel({
   documents,
   extractionInfoByDocument,
+  busy,
   onRefresh,
   onParseDocument,
   onViewOriginal,
   onCheckRequirements,
+  onToggleProcedureFreeze,
   onDeleteDocument,
 }: DocumentsPanelProps) {
   const [searchQuery, setSearchQuery] = useState("");
@@ -107,21 +111,32 @@ export function DocumentsPanel({
       <div className="list">
         {visibleDocuments.length > 0 ? visibleDocuments.map((doc) => (
           <article className="list-item" key={doc.stored_filename}>
-            <div>
-              <h3>{doc.source_filename}</h3>
-              <p>
+            <div className="document-option-copy">
+              <strong className="document-option-title">{doc.source_filename}</strong>
+              <span className="document-option-meta">
                 {formatDocumentType(doc.document_type)} · {doc.group_id ?? "no-group"} · {formatLanguage(doc.language)}
                 {" · "}Created: {formatDateTime(doc.created_at)}
                 {extractionInfoByDocument[doc.stored_filename]
                   ? ` · Extraction: ${extractionInfoByDocument[doc.stored_filename]?.provider} · ${extractionInfoByDocument[doc.stored_filename]?.model}`
                   : ""}
-              </p>
+              </span>
             </div>
             <div className="actions">
-              {doc.document_type === "procedure" || doc.document_type === "reference" ? (
-                <button className="button button-small button-ghost" onClick={() => onCheckRequirements(doc.stored_filename)}>
-                  Check requirements
-                </button>
+              {doc.document_type === "procedure" ? (
+                <>
+                  <button className="button button-small button-ghost" onClick={() => onCheckRequirements(doc.stored_filename)}>
+                    Check requirements
+                  </button>
+                  <button
+                    className="button button-small button-ghost"
+                    onClick={() => onToggleProcedureFreeze(doc.stored_filename, !doc.frozen)}
+                    disabled={busy === `freeze-doc:${doc.stored_filename}`}
+                  >
+                    {busy === `freeze-doc:${doc.stored_filename}`
+                      ? (doc.frozen ? "Unfreezing..." : "Freezing...")
+                      : (doc.frozen ? "Unfreeze" : "Freeze")}
+                  </button>
+                </>
               ) : null}
               <button className="button button-small" onClick={() => onParseDocument(doc.stored_filename)}>
                 Show parsed
@@ -129,7 +144,12 @@ export function DocumentsPanel({
               <button className="button button-small button-ghost" onClick={() => onViewOriginal(doc.stored_filename)}>
                 Show original
               </button>
-              <button className="button button-small button-danger" onClick={() => onDeleteDocument(doc.stored_filename)}>
+              <button
+                className="button button-small button-danger"
+                onClick={() => onDeleteDocument(doc.stored_filename)}
+                disabled={doc.document_type === "procedure" && doc.frozen}
+                title={doc.document_type === "procedure" && doc.frozen ? "Unfreeze this procedure before deleting it." : undefined}
+              >
                 Delete
               </button>
             </div>

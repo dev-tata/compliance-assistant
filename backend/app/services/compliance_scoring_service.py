@@ -82,10 +82,8 @@ def compute_scores(analysis: ComplianceAnalysis) -> ComplianceScores:
     findings = analysis.findings
     if not findings:
         return ComplianceScores(
-            m1_binary_rule_score=0.0,
             m2_ordinal_score=0.0,
             m3_evidence_weighted_score=0.0,
-            m4_confidence_aware_score=0.0,
             m5_grounding_score=0.0,
         )
 
@@ -97,11 +95,6 @@ def compute_scores(analysis: ComplianceAnalysis) -> ComplianceScores:
 
     total_weight = sum(f.weight for f in findings)
 
-    m1 = _safe_div(
-        sum(1.0 if f.status == "satisfied" else 0.0 for f in findings),
-        len(findings),
-    )
-
     m2 = _safe_div(
         sum(ordinal_map.get(f.status, 0.0) for f in findings),
         len(findings),
@@ -110,17 +103,6 @@ def compute_scores(analysis: ComplianceAnalysis) -> ComplianceScores:
     m3 = _safe_div(
         sum(
             ordinal_map.get(f.status, 0.0) * f.evidence_strength * f.weight
-            for f in findings
-        ),
-        total_weight,
-    )
-
-    m4 = _safe_div(
-        sum(
-            ordinal_map.get(f.status, 0.0)
-            * f.evidence_strength
-            * f.confidence
-            * f.weight
             for f in findings
         ),
         total_weight,
@@ -137,9 +119,7 @@ def compute_scores(analysis: ComplianceAnalysis) -> ComplianceScores:
     m5 = (evidence_presence + avg_evidence_strength + grounded_items) / 3.0
 
     return ComplianceScores(
-        m1_binary_rule_score=round(m1, 4),
         m2_ordinal_score=round(m2, 4),
         m3_evidence_weighted_score=round(m3, 4),
-        m4_confidence_aware_score=round(m4, 4),
         m5_grounding_score=round(m5, 4),
     )

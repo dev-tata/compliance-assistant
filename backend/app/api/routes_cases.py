@@ -7,7 +7,9 @@ from fastapi import APIRouter, HTTPException
 
 from app.schemas.cases import CaseCreate, CaseDocuments, CaseRecord, ComplianceSummary, ParsedCase
 from app.schemas.compliance import ComplianceRequest, ComplianceResponse
+from app.schemas.documents import DocumentRecord
 from app.services.case_service import (
+    _load_parsed_json_file,
     delete_case_compliance_result,
     get_case_deliverables_payload,
     get_case_compliance_result,
@@ -25,15 +27,16 @@ from app.services.compliance_service import (
     run_case_compliance_analysis,
 )
 from app.services.document_service import (
-    COMPLIANCE_DIR,
-    DELIVERABLES_DIR,
-    INDEXES_DIR,
     current_timestamp,
     find_document_or_404,
+    get_or_parse_document,
     load_document_registry,
     resolve_case_record_filenames,
 )
+from app.services.retrieval.record_index_service import prepare_record_indexes
+from app.services.retrieval.reference_index_service import prepare_reference_indexes
 from app.services.llm.errors import LLMConfigurationError, LLMGenerationError
+from app.services.storage_paths import get_case_dir
 
 router = APIRouter(prefix="/cases", tags=["cases"])
 
@@ -139,6 +142,11 @@ def delete_case_compliance_result_by_file(case_id: str, file_name: str):
 @router.post("/{case_id}/compliance", response_model=ComplianceResponse)
 def run_case_compliance(case_id: str, request: ComplianceRequest):
     case_payload = get_case_compliance_payload(case_id)
+    if request.method == "multi_source_rag" and request.additional_document_filenames:
+        _append_additional_documents(
+            case_payload=case_payload,
+            additional_document_filenames=request.additional_document_filenames,
+        )
     if not case_payload["procedures"]:
         raise HTTPException(
             status_code=400,
@@ -151,32 +159,40 @@ def run_case_compliance(case_id: str, request: ComplianceRequest):
         )
 
     try:
-        deliverables_payload = None
-        if request.requirement_source == "deliverables":
-            deliverables_payload = (
-                get_case_deliverables_payload(case_id, request.deliverable_file_name)
-                if request.deliverable_file_name
-                else get_case_procedure_deliverables_payload(case_id)
+        deliverables_payload = (
+            get_case_deliverables_payload(case_id, request.deliverable_file_name)
+            if request.deliverable_file_name
+            else get_case_procedure_deliverables_payload(case_id)
+        )
+        if deliverables_payload is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Compliance requires extracted deliverables for all procedure documents in the case.",
             )
-        elif request.requirement_source == "auto":
-            deliverables_payload = get_case_procedure_deliverables_payload(case_id)
 
-        if deliverables_payload is not None:
-            deliverables = deliverables_payload.get("deliverables", [])
-            selected_by_document = request.selected_deliverables_by_document
-            if selected_by_document:
-                filtered_deliverables = []
-                for item in deliverables:
-                    source_document = item.get("source_document")
-                    selected_names = selected_by_document.get(source_document or "", [])
-                    if not selected_names or item.get("requirement_text") in selected_names:
-                        filtered_deliverables.append(item)
-                deliverables = filtered_deliverables
-            case_payload["deliverables"] = deliverables
-            if deliverables_payload.get("extraction_provider"):
-                case_payload["extraction_provider"] = deliverables_payload.get("extraction_provider")
-            if deliverables_payload.get("extraction_model"):
-                case_payload["extraction_model"] = deliverables_payload.get("extraction_model")
+        deliverables = list(deliverables_payload.get("deliverables", []))
+        selected_by_document = request.selected_deliverables_by_document
+        if selected_by_document:
+            filtered_deliverables = []
+            for item in deliverables:
+                source_document = item.get("source_document")
+                selected_names = selected_by_document.get(source_document or "", [])
+                if not selected_names or item.get("requirement_text") in selected_names:
+                    filtered_deliverables.append(item)
+            deliverables = filtered_deliverables
+        if not deliverables:
+            raise HTTPException(
+                status_code=400,
+                detail="Compliance requires at least one extracted deliverable.",
+            )
+
+        case_payload["deliverables"] = deliverables
+        if deliverables_payload.get("extraction_provider"):
+            case_payload["extraction_provider"] = deliverables_payload.get("extraction_provider")
+        if deliverables_payload.get("extraction_model"):
+            case_payload["extraction_model"] = deliverables_payload.get("extraction_model")
+
+        _validate_compliance_inputs(case_payload=case_payload, request=request)
 
         return run_case_compliance_analysis(
             case_id=case_id,
@@ -192,12 +208,87 @@ def run_case_compliance(case_id: str, request: ComplianceRequest):
 
 
 def _remove_case_compliance_files(case_id: str) -> None:
-    for path in COMPLIANCE_DIR.glob(f"case_{case_id}_compliance_*.json"):
-        if path.exists():
-            path.unlink()
-    for path in DELIVERABLES_DIR.glob(f"case_{case_id}_deliverables_*.json"):
-        if path.exists():
-            path.unlink()
-    case_index_dir = INDEXES_DIR / f"case_{case_id}"
-    if case_index_dir.exists():
-        shutil.rmtree(case_index_dir)
+    case_dir = get_case_dir(case_id)
+    if case_dir.exists():
+        shutil.rmtree(case_dir)
+
+
+def _append_additional_documents(
+    *,
+    case_payload: dict,
+    additional_document_filenames: list[str],
+) -> None:
+    documents = load_document_registry()
+    existing_by_stored_filename = {
+        item.get("stored_filename")
+        for group in ("procedures", "records", "references")
+        for item in case_payload.get(group, [])
+    }
+
+    for stored_filename in additional_document_filenames:
+        if stored_filename in existing_by_stored_filename:
+            continue
+
+        index, item = find_document_or_404(documents, stored_filename)
+        document = DocumentRecord(**item)
+        try:
+            get_or_parse_document(documents, index, document)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        payload = _build_compliance_payload_for_document(documents[index])
+        if payload["document_type"] == "reference":
+            case_payload.setdefault("references", []).append(payload)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Only reference documents can be added to nested RAG runs.",
+            )
+        existing_by_stored_filename.add(stored_filename)
+
+
+def _build_compliance_payload_for_document(item: dict) -> dict:
+    document = DocumentRecord(**item)
+    return {
+        "document_type": document.document_type.value if document.document_type else None,
+        "source_filename": document.source_filename,
+        "stored_filename": document.stored_filename,
+        "group_id": document.group_id,
+        "language": document.language.value if document.language else None,
+        "content_hash": document.content_hash,
+        "parsed_json": _load_parsed_json_file(document),
+    }
+
+
+def _validate_compliance_inputs(*, case_payload: dict, request: ComplianceRequest) -> None:
+    deliverables = case_payload.get("deliverables", [])
+    records = case_payload.get("records", [])
+    references = case_payload.get("references", [])
+
+    if not deliverables:
+        raise HTTPException(status_code=400, detail="Compliance requires extracted deliverables.")
+    if not records:
+        raise HTTPException(status_code=400, detail="Compliance requires record documents.")
+
+    if request.method == "non_rag":
+        return
+
+    if not prepare_record_indexes(records):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{request.method} requires retrievable record sections and record indexes.",
+        )
+
+    if request.method != "multi_source_rag":
+        return
+
+    if not references:
+        raise HTTPException(
+            status_code=400,
+            detail="multi_source_rag requires reference documents with retrievable sections.",
+        )
+    if not prepare_reference_indexes(references):
+        raise HTTPException(
+            status_code=400,
+            detail="multi_source_rag requires retrievable reference sections and reference indexes.",
+        )

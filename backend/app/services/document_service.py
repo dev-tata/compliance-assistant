@@ -5,32 +5,34 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import HTTPException
 
 from typing import Any
 
-from app.schemas.documents import DocumentRecord, DocumentType
+from app.schemas.documents import DocumentRecord, DocumentType, is_record_document_type
 from app.schemas.deliverables import DeliverableExtractionResponse, DeliverableItem
 from app.schemas.parsing import ParsedDocument
 from app.services.parsing.parser_service import parse_document
+from app.services.retrieval.record_index_service import remove_record_index
+from app.services.retrieval.reference_index_service import remove_reference_index
+from app.services.storage_paths import (
+    DOCUMENT_REGISTRY_PATH,
+    DOCUMENTS_DIR,
+    EXTRACTION_DIR,
+    PARSED_DIR,
+    PROCEDURE_EXTRACTION_DIR,
+    RETRIEVAL_DIR,
+    STORAGE_DIR,
+    UPLOAD_DIR,
+    get_procedure_document_extraction_history_dir,
+    get_procedure_document_extraction_latest_path,
+    get_procedure_extraction_history_dir,
+    get_procedure_extraction_latest_path,
+)
 
-STORAGE_DIR = Path("storage")
-CACHE_DIR = STORAGE_DIR / "cache"
-UPLOAD_DIR = STORAGE_DIR / "uploads"
-PARSED_DIR = STORAGE_DIR / "parsed"
-COMPLIANCE_DIR = STORAGE_DIR / "compliance"
-DELIVERABLES_DIR = STORAGE_DIR / "deliverables"
-INDEXES_DIR = CACHE_DIR / "indexes"
-REGISTRY_PATH = STORAGE_DIR / "document_registry.json"
-
-STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-PARSED_DIR.mkdir(parents=True, exist_ok=True)
-COMPLIANCE_DIR.mkdir(parents=True, exist_ok=True)
-DELIVERABLES_DIR.mkdir(parents=True, exist_ok=True)
-INDEXES_DIR.mkdir(parents=True, exist_ok=True)
+REGISTRY_PATH = DOCUMENT_REGISTRY_PATH
 
 
 def current_timestamp() -> str:
@@ -42,7 +44,7 @@ def load_document_registry() -> list[dict]:
         return []
 
     try:
-        with open(REGISTRY_PATH, "r", encoding="utf-8") as file:
+        with open(REGISTRY_PATH, "r", encoding="utf-8-sig") as file:
             registry = json.load(file)
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Document registry corrupted")
@@ -76,6 +78,9 @@ def load_document_registry() -> list[dict]:
         if "language" not in item:
             item["language"] = None
             changed = True
+        if "frozen" not in item:
+            item["frozen"] = False
+            changed = True
         if not item.get("content_hash"):
             stored_at = item.get("stored_at")
             if stored_at and Path(stored_at).exists():
@@ -99,6 +104,14 @@ def find_document_or_404(registry: list[dict], stored_filename: str) -> tuple[in
         if item["stored_filename"] == stored_filename:
             return index, item
     raise HTTPException(status_code=404, detail="Document not found")
+
+
+def ensure_procedure_not_frozen(document: DocumentRecord, *, action: str) -> None:
+    if document.document_type == DocumentType.procedure and document.frozen:
+        raise HTTPException(
+            status_code=409,
+            detail=f'Procedure "{document.source_filename}" is frozen and cannot be used for {action}.',
+        )
 
 
 def get_or_parse_document(
@@ -151,9 +164,8 @@ def resolve_case_record_filenames(
         document = DocumentRecord(**item)
         if document.group_id not in procedure_group_ids:
             continue
-        if document.document_type in {DocumentType.procedure, DocumentType.reference}:
-            continue
-        resolved_records.append(document.stored_filename)
+        if is_record_document_type(document.document_type):
+            resolved_records.append(document.stored_filename)
 
     return resolved_records
 
@@ -162,6 +174,9 @@ def remove_document_files(document: DocumentRecord, registry: list[dict] | None 
     stored_path = Path(document.stored_at)
     has_other_references = False
     has_other_parsed_references = False
+    has_other_reference_entries = False
+    has_other_record_entries = False
+    has_other_procedure_entries = False
     if registry is not None:
         has_other_references = any(
             item.get("stored_filename") != document.stored_filename
@@ -176,6 +191,24 @@ def remove_document_files(document: DocumentRecord, registry: list[dict] | None 
             )
             for item in registry
         )
+        has_other_reference_entries = any(
+            item.get("stored_filename") != document.stored_filename
+            and item.get("content_hash") == document.content_hash
+            and item.get("document_type") == DocumentType.reference.value
+            for item in registry
+        )
+        has_other_record_entries = any(
+            item.get("stored_filename") != document.stored_filename
+            and item.get("content_hash") == document.content_hash
+            and _is_record_like_document_type(item.get("document_type"))
+            for item in registry
+        )
+        has_other_procedure_entries = any(
+            item.get("stored_filename") != document.stored_filename
+            and item.get("content_hash") == document.content_hash
+            and item.get("document_type") == DocumentType.procedure.value
+            for item in registry
+        )
 
     if stored_path.exists() and not has_other_references:
         stored_path.unlink()
@@ -184,14 +217,50 @@ def remove_document_files(document: DocumentRecord, registry: list[dict] | None 
     if cached_path.exists() and not has_other_parsed_references:
         cached_path.unlink()
 
-    for deliverable_path in _get_legacy_document_deliverable_paths(document):
-        if deliverable_path.exists():
-            deliverable_path.unlink()
+    if not has_other_reference_entries:
+        remove_reference_index(
+            {
+                "stored_filename": document.stored_filename,
+                "content_hash": document.content_hash,
+            }
+        )
+    if not has_other_record_entries:
+        remove_record_index(
+            {
+                "stored_filename": document.stored_filename,
+                "content_hash": document.content_hash,
+            }
+        )
 
-    if not has_other_parsed_references:
-        for deliverable_path in _get_shared_document_deliverable_paths(document):
-            if deliverable_path.exists():
-                deliverable_path.unlink()
+    procedure_document_dir = _get_document_extraction_dir(document)
+    if procedure_document_dir.exists():
+        for path in sorted(procedure_document_dir.rglob("*"), reverse=True):
+            if path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                path.rmdir()
+        procedure_document_dir.rmdir()
+
+    if not has_other_procedure_entries:
+        extraction_dir = _get_procedure_extraction_dir_for_content(document)
+        if extraction_dir.exists():
+            for path in sorted(extraction_dir.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    path.rmdir()
+            extraction_dir.rmdir()
+
+
+def _is_record_like_document_type(value: str | None) -> bool:
+    return is_record_document_type(value)
+
+
+def _get_procedure_extraction_dir_for_content(document: DocumentRecord) -> Path:
+    content_hash = document.content_hash or ""
+    if not content_hash:
+        raise HTTPException(status_code=500, detail="Procedure document is missing content_hash")
+    return PROCEDURE_EXTRACTION_DIR / content_hash
 
 
 def compute_file_hash(path: Path) -> str:
@@ -231,9 +300,7 @@ def extract_procedure_group_id(filename: str) -> str | None:
 
 def get_cached_parse_path(document: DocumentRecord) -> Path:
     if document.content_hash:
-        prefix = f"{document.group_id}_" if document.group_id else ""
-        source_stem = Path(document.source_filename).name
-        return PARSED_DIR / f"{prefix}{document.content_hash}_{source_stem}.json"
+        return PARSED_DIR / f"{document.content_hash}.json"
 
     if document.parsed_json_at:
         return Path(document.parsed_json_at)
@@ -251,10 +318,10 @@ def get_document_extraction_payload(stored_filename: str) -> dict[str, Any]:
     index, item = find_document_or_404(registry, stored_filename)
     document = DocumentRecord(**item)
 
-    if document.document_type not in {DocumentType.procedure, DocumentType.reference}:
+    if document.document_type != DocumentType.procedure:
         raise HTTPException(
             status_code=400,
-            detail="Deliverable extraction is supported only for procedure and reference documents.",
+            detail="Deliverable extraction is supported only for procedure documents.",
         )
 
     try:
@@ -292,17 +359,15 @@ def get_latest_document_deliverable_result(stored_filename: str) -> DeliverableE
     _, item = find_document_or_404(registry, stored_filename)
     document = DocumentRecord(**item)
 
-    if document.document_type not in {DocumentType.procedure, DocumentType.reference}:
+    if document.document_type != DocumentType.procedure:
         raise HTTPException(
             status_code=400,
-            detail="Deliverable extraction results are supported only for procedure and reference documents.",
+            detail="Deliverable extraction results are supported only for procedure documents.",
         )
 
-    matching_paths = _get_document_deliverable_paths(document, stored_filename=stored_filename)
-    if not matching_paths:
+    path = _resolve_document_extraction_latest_path(document)
+    if not path.exists():
         raise HTTPException(status_code=404, detail="No saved deliverable extraction found for this document")
-
-    path = matching_paths[0]
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -310,7 +375,6 @@ def get_latest_document_deliverable_result(stored_filename: str) -> DeliverableE
 
     payload.setdefault("created_at", current_timestamp())
     payload.setdefault("saved_at", path.as_posix())
-    payload.setdefault("method", "non_rag")
     payload.setdefault("document_stored_filename", stored_filename)
     payload.setdefault("source_filename", document.source_filename)
 
@@ -350,19 +414,18 @@ def update_latest_document_deliverable_result(
     _, item = find_document_or_404(registry, stored_filename)
     document = DocumentRecord(**item)
 
-    if document.document_type not in {DocumentType.procedure, DocumentType.reference}:
+    if document.document_type != DocumentType.procedure:
         raise HTTPException(
             status_code=400,
-            detail="Deliverable extraction results are supported only for procedure and reference documents.",
+            detail="Deliverable extraction results are supported only for procedure documents.",
         )
 
-    matching_paths = _get_document_deliverable_paths(document, stored_filename=stored_filename)
-    if not matching_paths:
+    source_path = _resolve_document_extraction_latest_path(document)
+    path = _get_document_extraction_latest_save_path(document)
+    if not source_path.exists():
         raise HTTPException(status_code=404, detail="No saved deliverable extraction found for this document")
-
-    path = matching_paths[0]
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(source_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=500, detail="Deliverable extraction file corrupted") from exc
 
@@ -391,88 +454,136 @@ def update_latest_document_deliverable_result(
         ),
         encoding="utf-8",
     )
+    _write_document_extraction_history_snapshot(document, response)
     return response
 
 
-def _get_document_deliverable_paths(
-    document: DocumentRecord,
-    *,
-    stored_filename: str | None = None,
-) -> list[Path]:
-    paths: dict[str, Path] = {}
-    for path in _get_document_deliverable_paths_by_patterns(
-        _build_document_deliverable_patterns(document, include_legacy=True)
-    ):
-        paths[path.name] = path
-    sorted_paths = sorted(paths.values(), key=_deliverable_sort_key, reverse=True)
-    if not stored_filename:
-        return sorted_paths
-
-    exact_paths = [
-        path
-        for path in sorted_paths
-        if _deliverable_belongs_to_stored_filename(path, stored_filename)
-    ]
-    if exact_paths:
-        return exact_paths
-    return sorted_paths
-
-
-def _get_document_deliverable_paths_by_patterns(patterns: list[str]) -> list[Path]:
-    matching_paths: list[Path] = []
-    for pattern in patterns:
-        matching_paths.extend(DELIVERABLES_DIR.glob(pattern))
-    return matching_paths
-
-
-def _build_document_deliverable_patterns(document: DocumentRecord) -> list[str]:
-    return _build_document_deliverable_patterns(document, include_legacy=True)
-
-
-def _build_document_deliverable_patterns(
-    document: DocumentRecord,
-    *,
-    include_legacy: bool,
-) -> list[str]:
-    patterns: list[str] = []
-    if document.content_hash:
-        patterns.append(f"document_{document.content_hash}_*_deliverables_*.json")
-    if include_legacy:
-        patterns.append(f"document_{document.stored_filename}_deliverables_*.json")
-    return patterns
-
-
-def _get_shared_document_deliverable_paths(document: DocumentRecord) -> list[Path]:
-    return sorted(
-        _get_document_deliverable_paths_by_patterns(
-            _build_document_deliverable_patterns(document, include_legacy=False)
-        ),
-        key=_deliverable_sort_key,
-        reverse=True,
+def list_document_deliverable_results(stored_filename: str) -> list[DeliverableExtractionResponse]:
+    from app.services.deliverable_methods.extraction_method_common import (
+        compute_deliverable_confidence,
     )
 
+    registry = load_document_registry()
+    _, item = find_document_or_404(registry, stored_filename)
+    document = DocumentRecord(**item)
 
-def _get_legacy_document_deliverable_paths(document: DocumentRecord) -> list[Path]:
-    return sorted(
-        DELIVERABLES_DIR.glob(f"document_{document.stored_filename}_deliverables_*.json"),
-        key=_deliverable_sort_key,
-        reverse=True,
+    if document.document_type != DocumentType.procedure:
+        raise HTTPException(
+            status_code=400,
+            detail="Deliverable extraction results are supported only for procedure documents.",
+        )
+
+    history_dir = _get_document_extraction_history_dir(document)
+    history_paths = sorted(history_dir.glob("*.json"), reverse=True)
+
+    if not history_paths and document.content_hash:
+        history_paths = sorted(get_procedure_extraction_history_dir(document.content_hash).glob("*.json"), reverse=True)
+    if not history_paths and document.content_hash:
+        legacy_document_history_dir = (
+            PROCEDURE_EXTRACTION_DIR / document.content_hash / "documents" / document.stored_filename / "history"
+        )
+        if legacy_document_history_dir.exists():
+            history_paths = sorted(legacy_document_history_dir.glob("*.json"), reverse=True)
+
+    responses: list[DeliverableExtractionResponse] = []
+    for path in history_paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=500, detail="Deliverable extraction file corrupted") from exc
+
+        if payload.get("document_stored_filename") not in (None, stored_filename):
+            continue
+
+        payload.setdefault("created_at", current_timestamp())
+        payload.setdefault("saved_at", path.as_posix())
+        payload.setdefault("document_stored_filename", stored_filename)
+        payload.setdefault("source_filename", document.source_filename)
+
+        response = DeliverableExtractionResponse(**payload)
+        normalized_deliverables = [
+            item.model_copy(
+                update={
+                    "confidence": compute_deliverable_confidence(item),
+                }
+            )
+            for item in response.deliverables
+        ]
+        if any(
+            abs(item.confidence - normalized.confidence) > 1e-9
+            for item, normalized in zip(response.deliverables, normalized_deliverables)
+        ):
+            response = response.model_copy(update={"deliverables": normalized_deliverables})
+            path.write_text(
+                response.model_dump_json(
+                    indent=2,
+                    exclude_none=True,
+                ),
+                encoding="utf-8",
+            )
+        responses.append(response)
+
+    return responses
+
+
+def _get_document_extraction_dir(document: DocumentRecord) -> Path:
+    content_hash = document.content_hash or ""
+    return get_procedure_document_extraction_history_dir(content_hash, document.stored_filename).parent
+
+
+def _get_document_extraction_latest_save_path(document: DocumentRecord) -> Path:
+    content_hash = document.content_hash or ""
+    return get_procedure_document_extraction_latest_path(content_hash, document.stored_filename)
+
+
+def _resolve_document_extraction_latest_path(document: DocumentRecord) -> Path:
+    latest_path = _get_document_extraction_latest_save_path(document)
+    if latest_path.exists():
+        return latest_path
+
+    content_hash = document.content_hash or ""
+    if content_hash:
+        legacy_document_dir = PROCEDURE_EXTRACTION_DIR / content_hash / "documents" / document.stored_filename
+        legacy_document_latest_path = legacy_document_dir / "latest.json"
+        if legacy_document_latest_path.exists():
+            return legacy_document_latest_path
+
+        legacy_history_paths = sorted(get_procedure_extraction_history_dir(content_hash).glob("*.json"), reverse=True)
+        for path in legacy_history_paths:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            if payload.get("document_stored_filename") == document.stored_filename:
+                return path
+
+        legacy_latest_path = get_procedure_extraction_latest_path(content_hash)
+        if legacy_latest_path.exists():
+            return legacy_latest_path
+
+    return latest_path
+
+
+def _get_document_extraction_history_dir(document: DocumentRecord) -> Path:
+    content_hash = document.content_hash or ""
+    return get_procedure_document_extraction_history_dir(content_hash, document.stored_filename)
+
+
+def _write_document_extraction_history_snapshot(
+    document: DocumentRecord,
+    response: DeliverableExtractionResponse,
+) -> None:
+    content_hash = document.content_hash or ""
+    if not content_hash:
+        return
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    history_path = _get_document_extraction_history_dir(document) / (
+        f"{timestamp}_{response.extraction_provider}_{response.extraction_model}_{uuid4().hex}.json"
     )
-
-
-def _deliverable_sort_key(path: Path) -> tuple[str, float]:
-    timestamp_match = re.search(r"_deliverables_(\d{8}T\d{6}Z)_", path.name)
-    if timestamp_match:
-        return (timestamp_match.group(1), path.stat().st_mtime)
-    return ("", path.stat().st_mtime)
-
-
-def _deliverable_belongs_to_stored_filename(path: Path, stored_filename: str) -> bool:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return False
-    return payload.get("document_stored_filename") == stored_filename
+    history_path.write_text(
+        response.model_dump_json(indent=2, exclude_none=True),
+        encoding="utf-8",
+    )
 
 
 def _load_parsed_json_file(document: DocumentRecord) -> dict[str, Any]:

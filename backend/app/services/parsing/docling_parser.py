@@ -13,6 +13,7 @@ from app.services.parsing.structure_utils import count_sections, make_section
 from app.services.parsing.table_utils import make_parsed_table
 
 logger = logging.getLogger(__name__)
+DOCLING_ARTIFACT_PATTERN = re.compile(r"<!--\s*rich cell\s*-->|<!--.*?-->", flags=re.IGNORECASE)
 
 
 def parse_with_docling(document: DocumentRecord) -> ParsedDocument:
@@ -33,6 +34,7 @@ def parse_with_docling(document: DocumentRecord) -> ParsedDocument:
         raise RuntimeError(
             f"Docling conversion produced no structured sections for file: {file_path.name}"
         )
+    sections = _apply_page_fallbacks(sections, fallback_page=1)
 
     metadata: dict[str, object] = {
         "structure": "sections",
@@ -43,9 +45,10 @@ def parse_with_docling(document: DocumentRecord) -> ParsedDocument:
     }
 
     page_count = _extract_docling_page_count(conversion_result, docling_document)
-    if page_count is not None:
-        metadata["page_count"] = page_count
-        metadata["pages_with_text"] = page_count
+    if page_count is None:
+        page_count = _infer_section_page_count(sections) or 1
+    metadata["page_count"] = page_count
+    metadata["pages_with_text"] = page_count
 
     return ParsedDocument(
         source_filename=document.source_filename,
@@ -90,7 +93,7 @@ def _build_sections_from_docling(
             continue
 
         if _is_table_item(item):
-            table = _build_table_from_docling_item(item, source_format)
+            table = _build_table_from_docling_item(item, docling_document, source_format)
             if table is None:
                 continue
 
@@ -237,15 +240,18 @@ def _normalize_text(text: str | None) -> str:
 
     normalized_lines: list[str] = []
     for raw_line in text.splitlines():
-        line = re.sub(r"\s+", " ", raw_line).strip()
+        line = DOCLING_ARTIFACT_PATTERN.sub(" ", raw_line)
+        line = re.sub(r"\s+", " ", line).strip()
         if line:
             normalized_lines.append(line)
 
     return "\n".join(normalized_lines).strip()
 
 
-def _build_table_from_docling_item(item: Any, source_format: str) -> ParsedTable | None:
-    headers, rows = _extract_docling_table_rows(item)
+def _build_table_from_docling_item(
+    item: Any, docling_document: Any, source_format: str
+) -> ParsedTable | None:
+    headers, rows = _extract_docling_table_rows(item, docling_document)
     if not rows:
         return None
 
@@ -268,9 +274,11 @@ def _postprocess_sections(
     flat_sections = _fold_inline_sections(flat_sections)
     if source_format != "pdf":
         flat_sections = _split_signature_sections(flat_sections, source_format)
+        flat_sections = _split_generic_body_sections(flat_sections)
 
     for section in flat_sections:
         section.tables = _normalize_tables_for_section(section)
+        section.text = _trim_table_duplicated_text(section)
         if section.section_label:
             section.heading_level = section.section_label.count(".") + 1
         elif section.heading_level is None:
@@ -280,6 +288,203 @@ def _postprocess_sections(
             section.text = None
 
     return _nest_sections_by_label(flat_sections)
+
+
+def _split_generic_body_sections(sections: list[ParsedSection]) -> list[ParsedSection]:
+    processed: list[ParsedSection] = []
+    for section in sections:
+        split_sections = _split_generic_body_section(section)
+        if split_sections is None:
+            processed.append(section)
+            continue
+        processed.extend(split_sections)
+    return processed
+
+
+def _split_generic_body_section(section: ParsedSection) -> list[ParsedSection] | None:
+    if (
+        not _is_generic_body_section(section)
+        or section.tables
+    ):
+        return None
+    text = (section.text or "").strip()
+    if not text:
+        return None
+
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", text) if block.strip()]
+    if len(blocks) < 4:
+        return None
+
+    groups = _group_generic_body_blocks(blocks)
+    heading_groups = [group for group in groups if group["is_heading"]]
+    if len(heading_groups) < 2:
+        return None
+
+    split_sections: list[ParsedSection] = []
+    index = 0
+    while index < len(groups):
+        group = groups[index]
+        if not group["is_heading"]:
+            index += 1
+            continue
+
+        heading = _normalize_heading_block(" ".join(group["blocks"]))
+        index += 1
+        body_blocks: list[str] = []
+        while index < len(groups) and not groups[index]["is_heading"]:
+            body_blocks.extend(groups[index]["blocks"])
+            index += 1
+        if not body_blocks:
+            continue
+        split_sections.append(
+            make_section(
+                section_label=None,
+                heading_title=heading,
+                heading_level=section.heading_level,
+                page_start=section.page_start,
+                page_end=section.page_end,
+                text="\n\n".join(body_blocks).strip() or None,
+                subsections=[],
+            )
+        )
+
+    non_empty_sections = [item for item in split_sections if item.text or item.tables]
+    return non_empty_sections or None
+
+
+def _is_generic_body_section(section: ParsedSection) -> bool:
+    if section.heading_title != "Document Body":
+        return False
+    label = (section.section_label or "").strip().lower()
+    return label in {"", "document_body"}
+
+
+def _group_generic_body_blocks(blocks: list[str]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    index = 0
+    while index < len(blocks):
+        block = blocks[index]
+        if _is_docx_body_heading_boundary(blocks, index):
+            heading_blocks = [block]
+            index += 1
+            while (
+                index < len(blocks)
+                and _is_docx_body_heading_boundary(blocks, index)
+                and _can_extend_heading_run(heading_blocks, blocks[index])
+            ):
+                heading_blocks.append(blocks[index])
+                index += 1
+            groups.append({"is_heading": True, "blocks": heading_blocks})
+            continue
+
+        text_blocks = [block]
+        index += 1
+        while index < len(blocks) and not _is_docx_body_heading_boundary(blocks, index):
+            text_blocks.append(blocks[index])
+            index += 1
+        groups.append({"is_heading": False, "blocks": text_blocks})
+    return groups
+
+
+def _is_docx_body_heading_boundary(blocks: list[str], index: int) -> bool:
+    block = blocks[index]
+    if not _looks_like_docx_body_heading(block):
+        return False
+
+    next_index = index + 1
+    while next_index < len(blocks) and _looks_like_docx_body_heading(blocks[next_index]):
+        next_index += 1
+    if next_index >= len(blocks):
+        return False
+
+    next_block = blocks[next_index]
+    if not _looks_like_substantive_body_block(next_block):
+        return False
+
+    previous_block = blocks[index - 1] if index > 0 else None
+    if _looks_like_field_label_heading(block, next_block, previous_block):
+        return False
+
+    return True
+
+
+def _can_extend_heading_run(existing_blocks: list[str], next_block: str) -> bool:
+    combined = " ".join(existing_blocks + [next_block]).strip()
+    if len(combined) > 60:
+        return False
+    tokens = re.findall(r"[A-Za-z0-9]+", combined)
+    return 0 < len(tokens) <= 6
+
+
+def _looks_like_docx_body_heading(value: str) -> bool:
+    text = " ".join(value.split()).strip()
+    if not text:
+        return False
+    if len(text) > 60:
+        return False
+    if ":" in text or ";" in text:
+        return False
+    tokens = re.findall(r"[A-Za-z0-9]+", text)
+    if not tokens or len(tokens) > 6:
+        return False
+    if len(tokens) == 1 and tokens[0].isdigit():
+        return False
+    uppercase_tokens = sum(1 for token in tokens if token.upper() == token)
+    titleish_tokens = sum(1 for token in tokens if token[:1].isupper())
+    alpha_tokens = re.findall(r"[A-Za-z]+", text)
+    if uppercase_tokens >= max(1, len(tokens) - 1):
+        return True
+    if titleish_tokens == len(tokens):
+        return True
+    if (
+        1 < len(alpha_tokens) <= 3
+        and any(
+            token != token.lower()
+            and token != token.upper()
+            and token != token.capitalize()
+            for token in alpha_tokens
+        )
+    ):
+        return True
+    if len(tokens) == 1 and tokens[0].isalpha():
+        return True
+    if re.fullmatch(r"\d+(?:\.\d+)*\.?\s+[A-Za-z].*", text):
+        return True
+    return False
+
+
+def _normalize_heading_block(value: str) -> str:
+    text = " ".join(value.split()).strip()
+    if not text:
+        return "Document Body"
+    if text.upper() == text:
+        return text
+    return text
+
+
+def _looks_like_substantive_body_block(value: str) -> bool:
+    text = " ".join(value.split()).strip()
+    if not text:
+        return False
+    if len(text) >= 30:
+        return True
+    tokens = re.findall(r"[A-Za-z0-9]+", text)
+    return len(tokens) >= 4
+
+
+def _looks_like_field_label_heading(
+    candidate: str, next_block: str, previous_block: str | None
+) -> bool:
+    tokens = re.findall(r"[A-Za-z0-9]+", " ".join(candidate.split()).strip())
+    if not 0 < len(tokens) <= 3:
+        return False
+    if not previous_block or not _looks_like_docx_body_heading(previous_block):
+        return False
+
+    next_text = " ".join(next_block.split()).strip()
+    if not next_text:
+        return False
+    return next_text.startswith(("-", "–", "—"))
 
 
 def _split_signature_sections(
@@ -572,6 +777,45 @@ def _normalize_tables_for_section(section: ParsedSection) -> list[ParsedTable]:
     return normalized_tables
 
 
+def _trim_table_duplicated_text(section: ParsedSection) -> str | None:
+    text = (section.text or "").strip()
+    if not text or not section.tables:
+        return text or None
+
+    duplication_start = _find_table_duplication_start(text, section.tables)
+    if duplication_start is None:
+        return text
+
+    trimmed = text[:duplication_start].rstrip(" \n;:,")
+    return trimmed or text
+
+
+def _find_table_duplication_start(text: str, tables: list[ParsedTable]) -> int | None:
+    normalized_text = text.lower()
+    for table in tables:
+        header_markers = [
+            f"{_normalize_text(header).lower()}:"
+            for header in table.headers[1:]
+            if _normalize_text(header)
+        ]
+        header_positions = sorted(
+            {
+                normalized_text.find(marker)
+                for marker in header_markers
+                if marker and normalized_text.find(marker) >= 0
+            }
+        )
+        if len(header_positions) < 2:
+            continue
+
+        first_position = header_positions[0]
+        tail = normalized_text[first_position:]
+        if tail.count(";") < 2:
+            continue
+        return first_position
+    return None
+
+
 def _normalize_table(section: ParsedSection, table: ParsedTable) -> ParsedTable | None:
     headers = list(table.headers)
     rows = [dict(row) for row in table.rows]
@@ -619,6 +863,8 @@ def _normalize_table(section: ParsedSection, table: ParsedTable) -> ParsedTable 
     rebuilt.headers = headers
     rebuilt.table_type = _infer_table_type(headers)
     rebuilt.table_markdown = _rows_to_markdown(headers, rows)
+    if _is_broken_table(rebuilt.table_markdown):
+        return None
 
     return rebuilt
 
@@ -747,11 +993,38 @@ def _is_low_signal_single_column_table(headers: list[str], rows: list[dict[str, 
     return set(values).issubset({"low", "medium", "high", "yes", "no", "n/a"})
 
 
-def _extract_docling_table_rows(item: Any) -> tuple[list[str], list[dict[str, str]]]:
+def _is_broken_table(table_markdown: str) -> bool:
+    if not table_markdown:
+        return False
+
+    lines = [line.strip() for line in table_markdown.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return True
+
+    column_counts: list[int] = []
+    for line in lines:
+        if "|" not in line:
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if not any(cells):
+            continue
+        if all(set(cell) <= {"-", ":"} for cell in cells):
+            continue
+        column_counts.append(len(cells))
+
+    if not column_counts:
+        return True
+
+    return max(column_counts) != min(column_counts)
+
+
+def _extract_docling_table_rows(
+    item: Any, docling_document: Any
+) -> tuple[list[str], list[dict[str, str]]]:
     export_to_dataframe = getattr(item, "export_to_dataframe", None)
     if callable(export_to_dataframe):
         try:
-            dataframe = export_to_dataframe()
+            dataframe = export_to_dataframe(doc=docling_document)
             if dataframe is not None and not dataframe.empty:
                 headers = _normalize_headers([str(column) for column in dataframe.columns.tolist()])
                 rows: list[dict[str, str]] = []
@@ -934,6 +1207,37 @@ def _extract_docling_page_count(conversion_result: Any, docling_document: Any) -
             return candidate
 
     return None
+
+
+def _apply_page_fallbacks(
+    sections: list[ParsedSection],
+    *,
+    fallback_page: int,
+) -> list[ParsedSection]:
+    for section in sections:
+        if section.page_start is None:
+            section.page_start = fallback_page
+        if section.page_end is None:
+            section.page_end = section.page_start or fallback_page
+        if section.subsections:
+            _apply_page_fallbacks(section.subsections, fallback_page=section.page_start or fallback_page)
+    return sections
+
+
+def _infer_section_page_count(sections: list[ParsedSection]) -> int | None:
+    page_numbers: list[int] = []
+    for section in sections:
+        if isinstance(section.page_start, int):
+            page_numbers.append(section.page_start)
+        if isinstance(section.page_end, int):
+            page_numbers.append(section.page_end)
+        if section.subsections:
+            nested_count = _infer_section_page_count(section.subsections)
+            if isinstance(nested_count, int):
+                page_numbers.append(nested_count)
+    if not page_numbers:
+        return None
+    return max(page_numbers)
 
 
 def _infer_table_type(headers: list[str]) -> str:

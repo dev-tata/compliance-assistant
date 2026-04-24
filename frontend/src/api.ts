@@ -4,7 +4,6 @@ import type {
   ComplianceMethod,
   ComplianceResponse,
   ComplianceSummary,
-  DeliverableExtractionMethod,
   DeliverableExtractionResponse,
   DocumentLanguage,
   DocumentRecord,
@@ -78,6 +77,19 @@ export async function deleteDocument(storedFilename: string): Promise<DocumentRe
   return handle<DocumentRecord>(
     await fetch(`${API_BASE}/documents/${encodeURIComponent(storedFilename)}`, {
       method: "DELETE",
+    }),
+  );
+}
+
+export async function setDocumentFrozen(
+  storedFilename: string,
+  frozen: boolean,
+): Promise<DocumentRecord> {
+  return handle<DocumentRecord>(
+    await fetch(`${API_BASE}/documents/${encodeURIComponent(storedFilename)}/freeze`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frozen }),
     }),
   );
 }
@@ -166,6 +178,7 @@ export async function runCompliance(input: {
   method: ComplianceMethod;
   instructions?: string;
   selectedDeliverablesByDocument?: SelectedDeliverablesByDocument;
+  additionalDocumentFilenames?: string[];
 }): Promise<ComplianceResponse> {
   return handle<ComplianceResponse>(
     await fetch(`${API_BASE}/cases/${encodeURIComponent(input.caseId)}/compliance`, {
@@ -176,7 +189,9 @@ export async function runCompliance(input: {
         model: input.model,
         method: input.method,
         instructions: input.instructions || null,
+        requirement_source: "deliverables",
         selected_deliverables_by_document: input.selectedDeliverablesByDocument ?? {},
+        additional_document_filenames: input.additionalDocumentFilenames ?? [],
       }),
     }),
   );
@@ -186,7 +201,6 @@ export async function extractDeliverables(input: {
   caseId: string;
   provider: string;
   model: string;
-  method: DeliverableExtractionMethod;
   instructions?: string;
 }): Promise<DeliverableExtractionResponse> {
   return handle<DeliverableExtractionResponse>(
@@ -196,7 +210,6 @@ export async function extractDeliverables(input: {
       body: JSON.stringify({
         provider: input.provider,
         model: input.model,
-        method: input.method,
         instructions: input.instructions || null,
       }),
     }),
@@ -207,7 +220,6 @@ export async function extractDocumentDeliverables(input: {
   storedFilename: string;
   provider: string;
   model: string;
-  method: DeliverableExtractionMethod;
   instructions?: string;
 }): Promise<DeliverableExtractionResponse> {
   return handle<DeliverableExtractionResponse>(
@@ -219,7 +231,6 @@ export async function extractDocumentDeliverables(input: {
         body: JSON.stringify({
           provider: input.provider,
           model: input.model,
-          method: input.method,
           instructions: input.instructions || null,
         }),
       },

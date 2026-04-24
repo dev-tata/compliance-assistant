@@ -16,6 +16,7 @@ import {
   listCases,
   listDocuments,
   runCompliance,
+  setDocumentFrozen,
   updateLatestDocumentDeliverables,
   uploadDocument,
 } from "./api";
@@ -26,6 +27,7 @@ import { CompliancePanel } from "./components/CompliancePanel";
 import { CreateCasePanel } from "./components/CreateCasePanel";
 import { DocumentsPanel } from "./components/DocumentsPanel";
 import { UploadPanel } from "./components/UploadPanel";
+import { formatMethodLabel } from "./utils/formatMethodLabel";
 import type {
   CaseRecord,
   CaseDocuments,
@@ -77,10 +79,12 @@ function renderList(items: string[]): string {
 function renderLinkedRows(
   rows: ComplianceResponse["analysis"]["linked_rows"],
   procedureToRecord: ComplianceResponse["analysis"]["procedure_to_record"] | ComplianceResponse["analysis"]["findings"],
+  retrievalK?: number | null,
 ): string {
   if (rows.length === 0) {
     return `
       <tr>
+        <td>None</td>
         <td>None</td>
         <td>None</td>
         <td>None</td>
@@ -92,21 +96,46 @@ function renderLinkedRows(
   }
 
   return rows.map((row, index) => {
-    const confidence = procedureToRecord[index]?.confidence;
+    const confidence = procedureToRecord?.[index]?.confidence;
     const confidenceLabel = typeof confidence === "number"
       ? `${(confidence * 100).toFixed(1)}%`
+      : "&mdash;";
+    const recallLabel = typeof row.record_recall_at_k === "number" && retrievalK
+      ? `${row.record_recall_at_k.toFixed(1)}`
       : "&mdash;";
     return `
     <tr>
       <td>${index + 1}</td>
       <td>${escapeHtml(row.requirement) || "&mdash;"}</td>
       <td>${confidenceLabel}</td>
+      <td>${recallLabel}</td>
       <td>${escapeHtml(row.status) || "&mdash;"}</td>
       <td>${escapeHtml(row.gap) || "&mdash;"}</td>
       <td>${escapeHtml(row.recommendation) || "&mdash;"}</td>
     </tr>
   `;
   }).join("");
+}
+
+function computeCompliancePercent(
+  procedureToRecord: ComplianceResponse["analysis"]["procedure_to_record"] | ComplianceResponse["analysis"]["findings"],
+): number {
+  if (!procedureToRecord?.length) {
+    return 0;
+  }
+
+  const statusScores = {
+    satisfied: 100,
+    partial: 50,
+    not_satisfied: 0,
+  } as const;
+
+  const totalScore = procedureToRecord.reduce(
+    (sum, finding) => sum + statusScores[finding.status],
+    0,
+  );
+
+  return Math.round(totalScore / procedureToRecord.length);
 }
 
 function computeDeliverableConfidence(item: DeliverableItem): number {
@@ -148,15 +177,25 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
   const procedureToRecord = (compliance.analysis.procedure_to_record?.length
     ? compliance.analysis.procedure_to_record
     : compliance.analysis.findings);
+  const compliancePercent = computeCompliancePercent(procedureToRecord);
 
   const requirementEvaluations = procedureToRecord.map((finding, index) => `
+    ${(() => {
+      const rowRecall = compliance.analysis.linked_rows?.[index]?.record_recall_at_k;
+      const recallLabel = typeof rowRecall === "number" && compliance.retrieval_metrics?.record_k
+        ? `Recall@${compliance.retrieval_metrics.record_k}: ${rowRecall.toFixed(1)} / 1.0`
+        : "";
+      return `
     <article class="finding requirement-evaluation">
       <header>
         <div>
           <div class="requirement-label">Requirement ${index + 1}</div>
           <strong>${escapeHtml(finding.requirement)}</strong>
         </div>
-        <span class="status status-${escapeHtml(finding.status)}">${escapeHtml(finding.status)}</span>
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+          ${recallLabel ? `<span>${escapeHtml(recallLabel)}</span>` : ""}
+          <span class="status status-${escapeHtml(finding.status)}">${escapeHtml(finding.status)}</span>
+        </div>
       </header>
       <div class="finding-metrics">
         <span><strong>Sources:</strong> ${escapeHtml(finding.source_documents.join(", ") || "none")}</span>
@@ -164,8 +203,9 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
       </div>
       <ul>${renderList(finding.evidence)}</ul>
     </article>
+  `;
+    })()}
   `).join("");
-
   popup.document.open();
   popup.document.write(`
     <!doctype html>
@@ -183,7 +223,7 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
           }
           h1, h2, h3, h4, p { margin-top: 0; }
           h1 { white-space: nowrap; }
-          .head, .score-grid, .findings { display: grid; gap: 12px; }
+          .head, .findings { display: grid; gap: 12px; }
           .head { grid-template-columns: 1fr; align-items: start; }
           .head-main p { margin-bottom: 18px; }
           .case-line { white-space: nowrap; }
@@ -195,8 +235,26 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
             border-radius: 8px;
             background: rgba(255,255,255,0.72);
           }
-          .score-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-          .score-grid { margin-bottom: 18px; }
+          .assessment {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            row-gap: 12px;
+            column-gap: 18px;
+          }
+          .assessment-item {
+            color: #6f6252;
+            text-align: center;
+            white-space: nowrap;
+            flex: 0 0 auto;
+          }
+          .assessment-item-edge-left {
+            text-align: left;
+          }
+          .assessment-item strong {
+            color: #231b12;
+          }
           .score-card span, .result-list li, .finding p, .finding li { color: #6f6252; }
           .section-block { margin-top: 28px; }
           .gap-table-wrap {
@@ -248,7 +306,11 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
           .status-partial { background: #fff1cf; color: #b7791f; }
           .status-not_satisfied { background: #ffdedd; color: #9b2226; }
           @media (max-width: 900px) {
-            .head, .score-grid { grid-template-columns: 1fr; }
+            .head { grid-template-columns: 1fr; }
+            .assessment {
+              flex-direction: column;
+              align-items: flex-start;
+            }
             .finding-metrics { grid-template-columns: 1fr; }
           }
         </style>
@@ -259,17 +321,18 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
             <h1>Compliance result</h1>
             <p class="code path-line">${escapeHtml(compliance.saved_at)}</p>
             ${caseTitle ? `<p class="case-line">Case: ${escapeHtml(caseTitle)}</p>` : ""}
-            <p>${escapeHtml(`${compliance.method} · ${compliance.compliance_provider} · ${compliance.compliance_model}`)}</p>
+            <p>${escapeHtml(`${formatMethodLabel(compliance.method)} · ${compliance.compliance_provider} · ${compliance.compliance_model}`)}</p>
             <p>Created: ${escapeHtml(formatDateTime(compliance.created_at))}</p>
           </div>
         </div>
-        <p class="assessment">${escapeHtml(compliance.analysis.overall_assessment)}</p>
-        <div class="score-grid">
-          <div class="score-card"><span>M1 Binary</span><strong> ${compliance.scores.m1_binary_rule_score.toFixed(4)}</strong></div>
-          <div class="score-card"><span>M2 Ordinal</span><strong> ${compliance.scores.m2_ordinal_score.toFixed(4)}</strong></div>
-          <div class="score-card"><span>M3 Weighted</span><strong> ${compliance.scores.m3_evidence_weighted_score.toFixed(4)}</strong></div>
-          <div class="score-card"><span>M4 Confidence</span><strong> ${compliance.scores.m4_confidence_aware_score.toFixed(4)}</strong></div>
-          <div class="score-card"><span>M5 Grounding</span><strong> ${compliance.scores.m5_grounding_score.toFixed(4)}</strong></div>
+        <div class="assessment">
+          <span class="assessment-item assessment-item-edge-left">Completed <strong>${compliance.analysis.completion_percent ?? compliancePercent}%</strong></span>
+          <span class="assessment-item">Evidence Support <strong>${compliance.scores.m3_evidence_weighted_score.toFixed(4)}</strong></span>
+          <span class="assessment-item">Grounding Quality <strong>${compliance.scores.m5_grounding_score.toFixed(4)}</strong></span>
+          ${compliance.retrieval_metrics?.record_k
+            ? `<span class="assessment-item">Recall@<strong>${compliance.retrieval_metrics.record_k}</strong></span>`
+            : ""}
+          <span class="assessment-item assessment-item-edge-left">Label: <strong>${escapeHtml(compliance.analysis.overall_assessment)}</strong></span>
         </div>
         <div class="gap-table-wrap">
           <table class="gap-table">
@@ -278,12 +341,17 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
                 <th>#</th>
                 <th>Requirement</th>
                 <th>Confidence</th>
+                <th>${compliance.retrieval_metrics?.record_k ? `Recall@${compliance.retrieval_metrics.record_k}` : "Recall@k"}</th>
                 <th>Status</th>
                 <th>Gap</th>
                 <th>Recommendation</th>
               </tr>
             </thead>
-            <tbody>${renderLinkedRows(compliance.analysis.linked_rows ?? [], procedureToRecord)}</tbody>
+            <tbody>${renderLinkedRows(
+              compliance.analysis.linked_rows ?? [],
+              procedureToRecord,
+              compliance.retrieval_metrics?.record_k,
+            )}</tbody>
           </table>
         </div>
         <section class="section-block">
@@ -313,7 +381,6 @@ export default function App() {
   const [cases, setCases] = useState<CaseRecord[]>([]);
   const [selectedProcedures, setSelectedProcedures] = useState<string[]>([]);
   const [selectedRecords, setSelectedRecords] = useState<string[]>([]);
-  const [selectedReferences, setSelectedReferences] = useState<string[]>([]);
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
   const [providers, setProviders] = useState<LLMProviderDescriptor[]>(FALLBACK_LLM_PROVIDERS);
@@ -322,9 +389,11 @@ export default function App() {
   const [complianceMethod, setComplianceMethod] = useState<ComplianceMethod>("non_rag");
   const [instructions, setInstructions] = useState("");
   const [selectedCaseId, setSelectedCaseId] = useState("");
+  const [selectedAdditionalComplianceDocuments, setSelectedAdditionalComplianceDocuments] = useState<string[]>([]);
   const [caseDocuments, setCaseDocuments] = useState<CaseDocuments | null>(null);
   const [latestCompliance, setLatestCompliance] = useState<ComplianceResponse | null>(null);
   const [complianceHistory, setComplianceHistory] = useState<ComplianceSummary[]>([]);
+  const [openComplianceDocumentsFile, setOpenComplianceDocumentsFile] = useState("");
   const [selectedComplianceFile, setSelectedComplianceFile] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadType, setUploadType] = useState<DocumentType>("procedure");
@@ -352,6 +421,16 @@ export default function App() {
   useEffect(() => {
     void refreshProviders();
   }, []);
+
+  useEffect(() => {
+    if (complianceMethod !== "multi_source_rag" && selectedAdditionalComplianceDocuments.length > 0) {
+      setSelectedAdditionalComplianceDocuments([]);
+    }
+  }, [complianceMethod, selectedAdditionalComplianceDocuments.length]);
+
+  useEffect(() => {
+    setSelectedAdditionalComplianceDocuments([]);
+  }, [selectedCaseId]);
 
   async function refreshProviders() {
     try {
@@ -393,9 +472,7 @@ export default function App() {
   }
 
   async function refreshExtractionInfo(loadedDocuments: DocumentRecord[]) {
-    const eligibleDocuments = loadedDocuments.filter(
-      (doc) => doc.document_type === "procedure" || doc.document_type === "reference",
-    );
+    const eligibleDocuments = loadedDocuments.filter((doc) => doc.document_type === "procedure");
 
     const infoEntries = await Promise.all(
       eligibleDocuments.map(async (doc) => {
@@ -447,17 +524,31 @@ export default function App() {
     }
   }
 
-  async function onShowCaseDocuments(caseId: string) {
-    if (caseDocuments?.case_id === caseId) {
+  async function onShowCaseDocuments(caseId: string, fileName?: string) {
+    if (fileName && openComplianceDocumentsFile === fileName) {
+      setOpenComplianceDocumentsFile("");
       setCaseDocuments(null);
       return;
     }
+
+    if (fileName && caseDocuments?.case_id === caseId) {
+      setOpenComplianceDocumentsFile(fileName);
+      return;
+    }
+
+    if (!fileName && caseDocuments?.case_id === caseId) {
+      setOpenComplianceDocumentsFile("");
+      setCaseDocuments(null);
+      return;
+    }
+
     setBusy(`case-docs:${caseId}`);
     setError("");
     try {
       const payload = await getCaseDocuments(caseId);
       setCaseDocuments(payload);
       setSelectedCaseId(caseId);
+      setOpenComplianceDocumentsFile(fileName ?? "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Loading case documents failed");
     } finally {
@@ -482,7 +573,6 @@ export default function App() {
           storedFilename: uploaded.stored_filename,
           provider: extractionProvider,
           model: extractionModel,
-          method: "non_rag",
         });
       }
       setUploadFile(null);
@@ -500,20 +590,24 @@ export default function App() {
     setBusy("case");
     setError("");
     try {
+      const fallbackTitle = selectedProcedures
+        .map((storedFilename) => documents.find((doc) => doc.stored_filename === storedFilename)?.source_filename)
+        .find((value): value is string => Boolean(value))
+        ?? "Case";
       const created = await createCase({
-        title,
+        title: title.trim() || fallbackTitle,
         procedureStoredFilenames: selectedProcedures,
         recordStoredFilenames: selectedRecords,
-        referenceStoredFilenames: selectedReferences,
+        referenceStoredFilenames: [],
         notes,
       });
       setTitle("");
       setNotes("");
       setSelectedProcedures([]);
       setSelectedRecords([]);
-      setSelectedReferences([]);
       setSelectedCaseId(created.case_id);
       setCaseDocuments(null);
+      setOpenComplianceDocumentsFile("");
       await refreshAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Case creation failed");
@@ -535,6 +629,7 @@ export default function App() {
         method: complianceMethod,
         instructions,
         selectedDeliverablesByDocument,
+        additionalDocumentFilenames: selectedAdditionalComplianceDocuments,
       });
       setLatestCompliance(result);
       const fileName = result.saved_at.split("/").pop() ?? "";
@@ -597,10 +692,18 @@ export default function App() {
   }
 
   async function onDeleteDocument(storedFilename: string) {
+    const document = documents.find((item) => item.stored_filename === storedFilename);
+    if (document?.document_type === "procedure" && document.frozen) {
+      setError(`Procedure "${document.source_filename}" is frozen. Unfreeze it before deleting.`);
+      return;
+    }
+    if (!window.confirm(`Delete document "${document?.source_filename ?? storedFilename}"?`)) {
+      return;
+    }
+
     setBusy(`delete-doc:${storedFilename}`);
     setError("");
     try {
-      const document = documents.find((item) => item.stored_filename === storedFilename);
       await deleteDocument(storedFilename);
       setSelectedDeliverablesByDocument((current) => {
         const next = { ...current };
@@ -652,6 +755,36 @@ export default function App() {
     }
   }
 
+  async function onToggleProcedureFreeze(storedFilename: string, frozen: boolean) {
+    const document = documents.find((item) => item.stored_filename === storedFilename);
+    if (!document || document.document_type !== "procedure") {
+      return;
+    }
+
+    setBusy(`freeze-doc:${storedFilename}`);
+    setError("");
+    try {
+      const updated = await setDocumentFrozen(storedFilename, frozen);
+      setDocuments((current) =>
+        current.map((item) => (item.stored_filename === storedFilename ? updated : item)),
+      );
+      setCaseDocuments((current) =>
+        current
+          ? {
+              ...current,
+              procedure_documents: current.procedure_documents.map((item) =>
+                item.stored_filename === storedFilename ? updated : item,
+              ),
+            }
+          : null,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Freeze update failed");
+    } finally {
+      setBusy("");
+    }
+  }
+
   function onDeliverableFieldChange(
     index: number,
     field: keyof DeliverableItem,
@@ -696,6 +829,9 @@ export default function App() {
   }
 
   function onDeleteDeliverable(index: number) {
+    if (!window.confirm(`Delete requirement ${index + 1}?`)) {
+      return;
+    }
     setEditableDeliverables((current) => current.filter((_, itemIndex) => itemIndex !== index));
   }
 
@@ -718,7 +854,8 @@ export default function App() {
           source_quote: sourceQuote === requirementText ? "" : sourceQuote,
           source_document: item.source_document.trim()
             || deliverablePicker.source_filename
-            || deliverablePicker.document_stored_filename,
+            || deliverablePicker.document_stored_filename
+            || "",
         };
       }).filter((item) => item.requirement_text);
 
@@ -745,6 +882,11 @@ export default function App() {
   }
 
   async function onDeleteCase(caseId: string) {
+    const caseRecord = cases.find((item) => item.case_id === caseId);
+    if (!window.confirm(`Delete case "${caseRecord?.title ?? caseId}"?`)) {
+      return;
+    }
+
     setBusy(`delete-case:${caseId}`);
     setError("");
     try {
@@ -752,11 +894,13 @@ export default function App() {
       if (selectedCaseId === caseId) {
         setSelectedCaseId("");
         setCaseDocuments(null);
+        setOpenComplianceDocumentsFile("");
         setLatestCompliance(null);
         setComplianceHistory([]);
         setSelectedComplianceFile("");
       }
       setCaseDocuments((current) => (current?.case_id === caseId ? null : current));
+      setOpenComplianceDocumentsFile((current) => (caseDocuments?.case_id === caseId ? "" : current));
       await refreshAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Case delete failed");
@@ -766,6 +910,10 @@ export default function App() {
   }
 
   async function onDeleteCompliance(caseId: string, fileName: string) {
+    if (!window.confirm(`Delete compliance result "${fileName}"?`)) {
+      return;
+    }
+
     setBusy(`delete-compliance:${fileName}`);
     setError("");
     try {
@@ -776,6 +924,10 @@ export default function App() {
           setLatestCompliance(null);
         }
       }
+      if (openComplianceDocumentsFile === fileName) {
+        setOpenComplianceDocumentsFile("");
+        setCaseDocuments(null);
+      }
       await refreshComplianceHistory();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Compliance delete failed");
@@ -784,11 +936,41 @@ export default function App() {
     }
   }
 
+  async function onDeleteAllCompliances() {
+    if (complianceHistory.length === 0) {
+      return;
+    }
+    if (!window.confirm(`Delete all ${complianceHistory.length} compliance results?`)) {
+      return;
+    }
+
+    setBusy("delete-all-compliances");
+    setError("");
+    try {
+      for (const item of complianceHistory) {
+        await deleteCaseComplianceResult(item.case_id, item.file_name);
+      }
+      setSelectedComplianceFile("");
+      setLatestCompliance(null);
+      setOpenComplianceDocumentsFile("");
+      setCaseDocuments(null);
+      await refreshComplianceHistory();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Bulk compliance delete failed");
+    } finally {
+      setBusy("");
+    }
+  }
+
   const procedureDocs = documents.filter((doc) => doc.document_type === "procedure");
-  const referenceDocs = documents.filter((doc) => doc.document_type === "reference");
   const recordDocs = documents.filter(
     (doc) => doc.document_type === "record" || (doc.document_type !== "procedure" && doc.document_type !== "reference"),
   );
+  const activeDeliverableDocument = deliverablePicker
+    ? documents.find((item) => item.stored_filename === deliverablePicker.document_stored_filename) ?? null
+    : null;
+  const deliverablePickerFrozen = activeDeliverableDocument?.document_type === "procedure"
+    && activeDeliverableDocument.frozen;
   const caseTitleById = new Map(cases.map((item) => [item.case_id, item.title]));
   const providerDefaults = Object.fromEntries(providers.map((item) => [item.key, item.default_model]));
 
@@ -831,10 +1013,12 @@ export default function App() {
           <DocumentsPanel
             documents={documents}
             extractionInfoByDocument={extractionInfoByDocument}
+            busy={busy}
             onRefresh={() => void refreshAll()}
             onParseDocument={(storedFilename) => void onParseDocument(storedFilename)}
             onViewOriginal={onViewOriginal}
             onCheckRequirements={(storedFilename) => void onCheckRequirements(storedFilename)}
+            onToggleProcedureFreeze={(storedFilename, frozen) => void onToggleProcedureFreeze(storedFilename, frozen)}
             onDeleteDocument={(storedFilename) => void onDeleteDocument(storedFilename)}
           />
         );
@@ -845,18 +1029,15 @@ export default function App() {
             notes={notes}
             procedureDocs={procedureDocs}
             recordDocs={recordDocs}
-            referenceDocs={referenceDocs}
             extractionInfoByDocument={extractionInfoByDocument}
             selectedProcedures={selectedProcedures}
             selectedRecords={selectedRecords}
-            selectedReferences={selectedReferences}
             busy={busy}
             onSubmit={onCreateCase}
             onTitleChange={setTitle}
             onNotesChange={setNotes}
             onSelectedProceduresChange={setSelectedProcedures}
             onSelectedRecordsChange={setSelectedRecords}
-            onSelectedReferencesChange={setSelectedReferences}
           />
         );
       case "cases":
@@ -875,12 +1056,15 @@ export default function App() {
         return (
           <CompliancePanel
             cases={cases}
+            documents={documents}
+            extractionInfoByDocument={extractionInfoByDocument}
             providers={providers}
             selectedCaseId={selectedCaseId}
             provider={provider}
             model={model}
             method={complianceMethod}
             instructions={instructions}
+            selectedAdditionalDocuments={selectedAdditionalComplianceDocuments}
             busy={busy}
             onSubmit={onRunCompliance}
             onSelectCase={setSelectedCaseId}
@@ -888,17 +1072,24 @@ export default function App() {
             onModelChange={setModel}
             onMethodChange={setComplianceMethod}
             onInstructionsChange={setInstructions}
+            onSelectedAdditionalDocumentsChange={setSelectedAdditionalComplianceDocuments}
           />
         );
       case "compliances":
         return (
           <ComplianceHistoryPanel
             cases={cases}
+            caseDocuments={caseDocuments}
             complianceHistory={complianceHistory}
+            documents={documents}
+            openDocumentsFile={openComplianceDocumentsFile}
             selectedComplianceFile={selectedComplianceFile}
             busy={busy}
+            extractionInfoByDocument={extractionInfoByDocument}
             onSelectCompliance={(caseId, fileName) => void onSelectCompliance(caseId, fileName)}
+            onShowDocuments={(caseId, fileName) => void onShowCaseDocuments(caseId, fileName)}
             onDeleteCompliance={(caseId, fileName) => void onDeleteCompliance(caseId, fileName)}
+            onDeleteAllCompliances={() => void onDeleteAllCompliances()}
           />
         );
       default:
@@ -939,20 +1130,28 @@ export default function App() {
             <div className="panel-head">
               <div>
                 <h2>Requirements</h2>
-                <p className="empty-state">{deliverablePicker.source_filename}</p>
+                <p className="empty-state">
+                  {deliverablePicker.source_filename}
+                  {deliverablePickerFrozen ? " " : null}
+                  {deliverablePickerFrozen ? <strong>Frozen</strong> : null}
+                </p>
               </div>
               <div className="actions">
-                <button className="button button-ghost button-tiny" onClick={onAddDeliverable} type="button">
-                  Add requirement
-                </button>
-                <button
-                  className="button button-tiny"
-                  onClick={() => void onSaveDeliverables()}
-                  type="button"
-                  disabled={busy === "save-deliverables"}
-                >
-                  {busy === "save-deliverables" ? "Saving..." : "Save"}
-                </button>
+                {!deliverablePickerFrozen ? (
+                  <button className="button button-ghost button-tiny" onClick={onAddDeliverable} type="button">
+                    Add requirement
+                  </button>
+                ) : null}
+                {!deliverablePickerFrozen ? (
+                  <button
+                    className="button button-tiny"
+                    onClick={() => void onSaveDeliverables()}
+                    type="button"
+                    disabled={busy === "save-deliverables"}
+                  >
+                    {busy === "save-deliverables" ? "Saving..." : "Save"}
+                  </button>
+                ) : null}
                 <button className="button button-ghost button-tiny" onClick={() => setDeliverablePicker(null)} type="button">
                   Close
                 </button>
@@ -961,15 +1160,21 @@ export default function App() {
             <div className="stack">
               {editableDeliverables.map((item, index) => {
                 return (
-                  <article className="panel" key={`${index}:${item.requirement_text || "new"}`}>
+                  <article className="panel" key={index}>
                     <div className="requirement-row">
                       <strong>{index + 1}</strong>
                       <input
                         value={item.requirement_text}
                         onChange={(e) => onDeliverableFieldChange(index, "requirement_text", e.target.value)}
+                        disabled={deliverablePickerFrozen}
                       />
                       <span className="requirement-confidence">{(item.confidence * 100).toFixed(1)}%</span>
-                      <button className="button button-ghost button-tiny" onClick={() => onDeleteDeliverable(index)} type="button">
+                      <button
+                        className="button button-ghost button-tiny"
+                        onClick={() => onDeleteDeliverable(index)}
+                        type="button"
+                        disabled={deliverablePickerFrozen}
+                      >
                         Delete
                       </button>
                     </div>

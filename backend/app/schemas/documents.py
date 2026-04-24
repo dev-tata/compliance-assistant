@@ -20,6 +20,33 @@ class DocumentType(str, Enum):
     reference = "reference"
 
 
+RECORD_DOCUMENT_TYPES = frozenset(
+    {
+        DocumentType.record,
+        DocumentType.template,
+        DocumentType.registry,
+        DocumentType.risk_assessment,
+        DocumentType.requirement_specification,
+        DocumentType.validation_plan,
+        DocumentType.validation_report,
+        DocumentType.test_plan,
+        DocumentType.test_execution,
+        DocumentType.change_request,
+    }
+)
+
+
+def is_record_document_type(value: DocumentType | str | None) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, DocumentType):
+        return value in RECORD_DOCUMENT_TYPES
+    try:
+        return DocumentType(value) in RECORD_DOCUMENT_TYPES
+    except ValueError:
+        return False
+
+
 class DocumentLanguage(str, Enum):
     en = "en"
     sv = "sv"
@@ -41,3 +68,8 @@ class DocumentRecord(BaseModel):
     group_id: str | None = None
     parsed_json_at: str | None = None
     content_hash: str | None = None
+    frozen: bool = False
+
+
+class DocumentFreezeUpdateRequest(BaseModel):
+    frozen: bool

@@ -1,7 +1,8 @@
 import { useState } from "react";
 
-import type { CaseRecord, ComplianceSummary } from "../types";
+import type { CaseDocuments, CaseRecord, ComplianceSummary, DocumentRecord } from "../types";
 import { formatDateTime } from "../utils/formatDateTime";
+import { formatMethodLabel } from "../utils/formatMethodLabel";
 
 function normalizeSearchValue(value: string) {
   return value
@@ -29,20 +30,32 @@ function matchesSearchFields(fields: string[], query: string) {
 
 type ComplianceHistoryPanelProps = {
   cases: CaseRecord[];
+  caseDocuments: CaseDocuments | null;
   complianceHistory: ComplianceSummary[];
+  documents: DocumentRecord[];
+  openDocumentsFile: string;
   selectedComplianceFile: string;
   busy: string;
+  extractionInfoByDocument: Record<string, { provider: string; model: string } | null>;
   onSelectCompliance: (caseId: string, fileName: string) => void;
+  onShowDocuments: (caseId: string, fileName: string) => void;
   onDeleteCompliance: (caseId: string, fileName: string) => void;
+  onDeleteAllCompliances: () => void;
 };
 
 export function ComplianceHistoryPanel({
   cases,
+  caseDocuments,
   complianceHistory,
+  documents,
+  openDocumentsFile,
   selectedComplianceFile,
   busy,
+  extractionInfoByDocument,
   onSelectCompliance,
+  onShowDocuments,
   onDeleteCompliance,
+  onDeleteAllCompliances,
 }: ComplianceHistoryPanelProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const caseTitleById = new Map(cases.map((item) => [item.case_id, item.title]));
@@ -59,9 +72,42 @@ export function ComplianceHistoryPanel({
     return matchesSearchFields([item.provider, item.model], searchQuery);
   });
 
+  function renderDocumentList(documents: DocumentRecord[], emptyLabel: string, showExtraction: boolean) {
+    if (documents.length === 0) {
+      return <p className="empty-state">{emptyLabel}</p>;
+    }
+
+    return (
+      <ul className="inline-doc-list">
+        {documents.map((doc) => (
+          <li key={doc.stored_filename}>
+            <span className="document-option-copy">
+              <strong className="document-option-title">{doc.source_filename}</strong>
+              {showExtraction && extractionInfoByDocument[doc.stored_filename] ? (
+                <span className="document-option-meta">
+                  Extraction: {extractionInfoByDocument[doc.stored_filename]?.provider} · {extractionInfoByDocument[doc.stored_filename]?.model}
+                </span>
+              ) : null}
+            </span>
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
   return (
-    <section className="panel">
-      <h2>Compliances</h2>
+    <section className="panel compliance-history-panel">
+      <div className="panel-head">
+        <h2>Compliances</h2>
+        <button
+          className="button button-small button-danger"
+          onClick={onDeleteAllCompliances}
+          disabled={complianceHistory.length === 0 || busy === "delete-all-compliances"}
+          type="button"
+        >
+          Delete all
+        </button>
+      </div>
       <div className="panel-search">
         <input
           type="search"
@@ -74,25 +120,69 @@ export function ComplianceHistoryPanel({
         {visibleComplianceHistory.length > 0 ? (
           visibleComplianceHistory.map((item) => (
             <article className={`history-item ${selectedComplianceFile === item.file_name ? "active" : ""}`} key={item.file_name}>
-              <button
-                className="history-main"
-                onClick={() => onSelectCompliance(item.case_id, item.file_name)}
-                disabled={busy === `compliance-history:${item.file_name}`}
-              >
-                <span className="history-case">{caseTitleById.get(item.case_id) ?? item.case_id}</span>
-                <strong>{item.provider} · {item.model}</strong>
-                <p>Method: {item.method}</p>
-                <p>Created: {formatDateTime(item.created_at)}</p>
-                <p>{item.overall_assessment}</p>
-                <code>{item.file_name}</code>
-              </button>
-              <button
-                className="button button-small button-danger"
-                onClick={() => onDeleteCompliance(item.case_id, item.file_name)}
-                disabled={busy === `delete-compliance:${item.file_name}`}
-              >
-                Delete
-              </button>
+              {(() => {
+                const isDocumentsOpen = openDocumentsFile === item.file_name && caseDocuments?.case_id === item.case_id;
+                const referenceDocuments = item.reference_stored_filenames
+                  .map((storedFilename) => documents.find((doc) => doc.stored_filename === storedFilename))
+                  .filter((doc): doc is DocumentRecord => Boolean(doc));
+
+                return (
+                  <>
+                    <div className="history-main">
+                      <span className="history-case">{caseTitleById.get(item.case_id) ?? item.case_id}</span>
+                      <div className="history-title-row">
+                        <strong className="document-option-title">{item.provider} · {item.model}</strong>
+                        <span className="document-option-meta">Completed {item.completion_percent}%</span>
+                      </div>
+                      <div className="history-meta-row document-option-meta">
+                        <span>Method: {formatMethodLabel(item.method)}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>Created: {formatDateTime(item.created_at)}</span>
+                      </div>
+                      <code>{item.file_name}</code>
+                    </div>
+                    <div className="actions history-actions">
+                      <button
+                        className="button button-small button-ghost"
+                        onClick={() => onShowDocuments(item.case_id, item.file_name)}
+                        disabled={busy === `case-docs:${item.case_id}`}
+                      >
+                        {isDocumentsOpen ? "Close documents" : "Documents"}
+                      </button>
+                      <button
+                        className="button button-small"
+                        onClick={() => onSelectCompliance(item.case_id, item.file_name)}
+                        disabled={busy === `compliance-history:${item.file_name}`}
+                      >
+                        Results
+                      </button>
+                      <button
+                        className="button button-small button-danger"
+                        onClick={() => onDeleteCompliance(item.case_id, item.file_name)}
+                        disabled={busy === `delete-compliance:${item.file_name}`}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                    {isDocumentsOpen ? (
+                      <div className="case-documents-inline">
+                        <div>
+                          <h3>Procedure files</h3>
+                          {renderDocumentList(caseDocuments.procedure_documents, "No procedure files.", true)}
+                        </div>
+                        <div>
+                          <h3>Record files</h3>
+                          {renderDocumentList(caseDocuments.record_documents, "No record files.", false)}
+                        </div>
+                        <div>
+                          <h3>Reference files</h3>
+                          {renderDocumentList(referenceDocuments, "No reference files.", false)}
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
+                );
+              })()}
             </article>
           ))
         ) : (

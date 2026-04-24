@@ -11,3 +11,4 @@ openpyxl
 python-docx
 numpy
 faiss-cpu
+sentence-transformers

@@ -2,15 +2,7 @@ import type { DocumentLanguage, DocumentType } from "./types";
 
 export const documentTypes: DocumentType[] = [
   "procedure",
-  "template",
-  "registry",
-  "risk_assessment",
-  "requirement_specification",
-  "validation_plan",
-  "validation_report",
-  "test_plan",
-  "test_execution",
-  "change_request",
+  "record",
   "reference",
 ];
 
