@@ -182,6 +182,7 @@ export type DeliverableItem = {
   source_quote: string;
   source_document: string;
   required_by_procedure: boolean;
+  weight: number;
   validated_confidence: number;
 };
 

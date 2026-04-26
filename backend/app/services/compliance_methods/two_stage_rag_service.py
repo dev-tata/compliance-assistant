@@ -149,6 +149,17 @@ def run_two_stage_rag_compliance(
     return response
 
 
+def _extract_deliverable_weights(deliverables: list[dict[str, Any]]) -> list[float]:
+    weights: list[float] = []
+    for item in deliverables:
+        raw_weight = item.get("weight")
+        if isinstance(raw_weight, (int, float)) and raw_weight > 0:
+            weights.append(float(raw_weight))
+        else:
+            weights.append(1.0)
+    return weights
+
+
 def _run_stage_1_non_rag(
     *,
     llm_service: Any,
@@ -179,7 +190,10 @@ def _run_stage_1_non_rag(
         expected_count=len(deliverables),
         allowed_record_documents=allowed_record_documents,
     )
-    analysis = enrich_analysis_for_scoring(analysis)
+    analysis = enrich_analysis_for_scoring(
+        analysis,
+        requirement_weights=_extract_deliverable_weights(deliverables),
+    )
     analysis = apply_computed_overall_assessment(analysis)
     analysis = _tag_analysis_evidence(
         analysis=analysis,
@@ -411,7 +425,10 @@ def _merge_stage_analysis(
             retrieved_payload=retrieved_payload,
         ),
     )
-    analysis = enrich_analysis_for_scoring(analysis)
+    analysis = enrich_analysis_for_scoring(
+        analysis,
+        requirement_weights=_extract_deliverable_weights(deliverables),
+    )
     return apply_computed_overall_assessment(analysis)
 
 

@@ -34,6 +34,7 @@ class DeliverableItem(BaseModel):
     source_quote: str
     source_document: str
     required_by_procedure: bool = True
+    weight: float = Field(default=1.0, gt=0.0)
     validated_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
     @model_validator(mode="before")
@@ -54,6 +55,8 @@ class DeliverableItem(BaseModel):
             data["heading_title"] = "Unknown section"
         if "validated_confidence" not in data or data.get("validated_confidence") is None:
             data["validated_confidence"] = data.get("confidence", 0.0)
+        if "weight" not in data or not data.get("weight"):
+            data["weight"] = 1.0
         return data
 
     @model_validator(mode="after")

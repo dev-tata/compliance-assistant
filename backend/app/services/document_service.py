@@ -382,6 +382,7 @@ def get_latest_document_deliverable_result(stored_filename: str) -> DeliverableE
     normalized_deliverables = [
         item.model_copy(
             update={
+                "weight": _compute_validated_deliverable_weight(item),
                 "validated_confidence": _compute_validated_deliverable_confidence(
                     item,
                     parsed_payload=parsed_payload,
@@ -391,7 +392,8 @@ def get_latest_document_deliverable_result(stored_filename: str) -> DeliverableE
         for item in response.deliverables
     ]
     if any(
-        abs(item.validated_confidence - normalized.validated_confidence) > 1e-9
+        abs(item.weight - normalized.weight) > 1e-9
+        or abs(item.validated_confidence - normalized.validated_confidence) > 1e-9
         for item, normalized in zip(response.deliverables, normalized_deliverables)
     ):
         response = response.model_copy(update={"deliverables": normalized_deliverables})
@@ -432,6 +434,7 @@ def update_latest_document_deliverable_result(
     normalized_deliverables = [
         item.model_copy(
             update={
+                "weight": _compute_validated_deliverable_weight(item),
                 "validated_confidence": _compute_validated_deliverable_confidence(
                     item,
                     parsed_payload=parsed_payload,
@@ -504,6 +507,7 @@ def list_document_deliverable_results(stored_filename: str) -> list[DeliverableE
         normalized_deliverables = [
             item.model_copy(
                 update={
+                    "weight": _compute_validated_deliverable_weight(item),
                     "validated_confidence": _compute_validated_deliverable_confidence(
                         item,
                         parsed_payload=parsed_payload,
@@ -513,7 +517,8 @@ def list_document_deliverable_results(stored_filename: str) -> list[DeliverableE
             for item in response.deliverables
         ]
         if any(
-            abs(item.validated_confidence - normalized.validated_confidence) > 1e-9
+            abs(item.weight - normalized.weight) > 1e-9
+            or abs(item.validated_confidence - normalized.validated_confidence) > 1e-9
             for item, normalized in zip(response.deliverables, normalized_deliverables)
         ):
             response = response.model_copy(update={"deliverables": normalized_deliverables})
@@ -624,6 +629,16 @@ def _compute_validated_deliverable_confidence(
 
     section = _resolve_deliverable_source_section(item, parsed_payload=parsed_payload)
     return compute_deliverable_confidence(item, section=section if section is not None else None)
+
+
+def _compute_validated_deliverable_weight(item: DeliverableItem) -> float:
+    from app.services.deliverable_methods.extraction_method_common import (
+        compute_deliverable_weight,
+    )
+
+    if item.weight > 0:
+        return round(item.weight, 4)
+    return compute_deliverable_weight(item)
 
 
 def _resolve_deliverable_source_section(

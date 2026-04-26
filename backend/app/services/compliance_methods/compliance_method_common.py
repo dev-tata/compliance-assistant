@@ -49,7 +49,10 @@ def execute_compliance_method(
         expected_count=len(case_payload.get("deliverables", [])) if isinstance(case_payload, dict) else 0,
         allowed_record_documents=allowed_record_documents,
     )
-    analysis = enrich_analysis_for_scoring(analysis)
+    analysis = enrich_analysis_for_scoring(
+        analysis,
+        requirement_weights=_extract_deliverable_weights(case_payload),
+    )
     analysis = apply_computed_overall_assessment(analysis)
     scores = compute_scores(analysis)
 
@@ -81,6 +84,24 @@ def execute_compliance_method(
         encoding="utf-8",
     )
     return response
+
+
+def _extract_deliverable_weights(case_payload: dict[str, object]) -> list[float] | None:
+    if not isinstance(case_payload, dict):
+        return None
+    deliverables = case_payload.get("deliverables", [])
+    if not isinstance(deliverables, list):
+        return None
+
+    weights: list[float] = []
+    for item in deliverables:
+        if isinstance(item, dict):
+            raw_weight = item.get("weight")
+            if isinstance(raw_weight, (int, float)) and raw_weight > 0:
+                weights.append(float(raw_weight))
+                continue
+        weights.append(1.0)
+    return weights
 
 
 def build_shared_output_instructions(
@@ -298,6 +319,7 @@ def serialize_deliverable_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
         "heading_title": item.get("heading_title"),
         "requirement_text": item.get("requirement_text"),
         "source_quote": item.get("source_quote"),
+        "weight": item.get("weight"),
         "retrieval_score": item.get("retrieval_score"),
     }
 

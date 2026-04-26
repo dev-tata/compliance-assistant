@@ -13,10 +13,17 @@ def _safe_div(num: float, den: float) -> float:
     return num / den
 
 
-def enrich_analysis_for_scoring(analysis: ComplianceAnalysis) -> ComplianceAnalysis:
+def enrich_analysis_for_scoring(
+    analysis: ComplianceAnalysis,
+    *,
+    requirement_weights: list[float] | None = None,
+) -> ComplianceAnalysis:
     enriched_findings = [
-        _enrich_finding(finding)
-        for finding in analysis.findings
+        _enrich_finding(
+            finding,
+            weight=requirement_weights[index] if requirement_weights and index < len(requirement_weights) else None,
+        )
+        for index, finding in enumerate(analysis.findings)
     ]
     return analysis.model_copy(
         update={
@@ -26,15 +33,19 @@ def enrich_analysis_for_scoring(analysis: ComplianceAnalysis) -> ComplianceAnaly
     )
 
 
-def _enrich_finding(finding: ComplianceFinding) -> ComplianceFinding:
+def _enrich_finding(
+    finding: ComplianceFinding,
+    *,
+    weight: float | None = None,
+) -> ComplianceFinding:
     evidence_strength = _compute_evidence_strength(finding)
     confidence = _compute_confidence(finding.status, evidence_strength)
-    weight = _compute_weight(finding.requirement)
+    effective_weight = weight if weight is not None else _compute_weight(finding.requirement)
     return finding.model_copy(
         update={
             "evidence_strength": evidence_strength,
             "confidence": confidence,
-            "weight": weight,
+            "weight": effective_weight,
         }
     )
 def _compute_evidence_strength(finding: ComplianceFinding) -> float:

@@ -488,6 +488,15 @@ textarea {
   border: 1px solid #d3b37c;
 }
 
+.modal-panel-head {
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.modal-document-status {
+  margin-bottom: 0;
+}
+
 .case-select {
   display: flex;
   flex-direction: column;
@@ -888,9 +897,16 @@ textarea {
 
 .requirement-row {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 64px auto;
   gap: 6px;
   align-items: center;
+}
+
+.requirement-row-editable {
+  grid-template-columns: 24px minmax(0, 1fr) 72px auto;
+}
+
+.requirement-row-frozen {
+  grid-template-columns: 24px minmax(0, 1fr) 56px 64px;
 }
 
 .requirement-row input {
@@ -902,6 +918,19 @@ textarea {
   background: rgba(255, 255, 255, 0.7);
   color: var(--text);
   font-size: var(--fs-sm);
+}
+
+.requirement-weight-input {
+  width: 72px;
+  min-width: 72px;
+  text-align: right;
+}
+
+.requirement-weight {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  text-align: right;
+  white-space: nowrap;
 }
 
 .requirement-confidence {

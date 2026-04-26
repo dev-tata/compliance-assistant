@@ -27,6 +27,7 @@ import { ComplianceHistoryPanel } from "./components/ComplianceHistoryPanel";
 import { CompliancePanel } from "./components/CompliancePanel";
 import { CreateCasePanel } from "./components/CreateCasePanel";
 import { DocumentsPanel } from "./components/DocumentsPanel";
+import { FrozenBadge } from "./components/FrozenBadge";
 import { UploadPanel } from "./components/UploadPanel";
 import { formatMethodLabel } from "./utils/formatMethodLabel";
 import type {
@@ -1026,6 +1027,15 @@ export default function App() {
     );
   }
 
+  function onDeliverableWeightChange(index: number, value: string) {
+    const parsed = Number.parseFloat(value);
+    onDeliverableFieldChange(
+      index,
+      "weight",
+      Number.isFinite(parsed) && parsed > 0 ? Number(parsed.toFixed(2)) : 1,
+    );
+  }
+
   function onAddDeliverable() {
     const sourceDocument =
       deliverablePicker?.source_filename ??
@@ -1042,6 +1052,7 @@ export default function App() {
         source_quote: "",
         source_document: sourceDocument,
         required_by_procedure: true,
+        weight: 1,
         validated_confidence: 0,
       },
     ]);
@@ -1372,13 +1383,15 @@ export default function App() {
       {deliverablePicker ? (
         <div className="overlay" role="dialog" aria-modal="true">
           <div className="modal-card">
-            <div className="panel-head">
+            <div className="panel-head modal-panel-head">
               <div>
                 <h2>Requirements</h2>
-                <p className="empty-state">
+                <p className="empty-state modal-document-status">
                   {deliverablePicker.source_filename}
-                  {deliverablePickerFrozen ? " " : null}
-                  {deliverablePickerFrozen ? <strong>Frozen</strong> : null}
+                  {deliverablePickerFrozen && activeDeliverableDocument ? " " : null}
+                  {deliverablePickerFrozen && activeDeliverableDocument ? (
+                    <FrozenBadge document={activeDeliverableDocument} />
+                  ) : null}
                 </p>
               </div>
               <div className="actions">
@@ -1406,7 +1419,7 @@ export default function App() {
               {editableDeliverables.map((item, index) => {
                 return (
                   <article className="panel" key={index}>
-                    <div className="requirement-row">
+                    <div className={`requirement-row ${deliverablePickerFrozen ? "requirement-row-frozen" : "requirement-row-editable"}`}>
                       <strong>{index + 1}</strong>
                       <input
                         value={item.requirement_text}
@@ -1414,18 +1427,31 @@ export default function App() {
                         disabled={deliverablePickerFrozen}
                       />
                       {deliverablePickerFrozen ? (
+                        <span className="requirement-weight">W {item.weight.toFixed(1)}</span>
+                      ) : (
+                        <input
+                          className="requirement-weight-input"
+                          type="number"
+                          min="0.1"
+                          step="0.1"
+                          value={item.weight}
+                          onChange={(e) => onDeliverableWeightChange(index, e.target.value)}
+                        />
+                      )}
+                      {deliverablePickerFrozen ? (
                         <span className="requirement-confidence">
                           {(item.validated_confidence * 100).toFixed(1)}%
                         </span>
                       ) : null}
-                      <button
-                        className="button button-ghost button-tiny"
-                        onClick={() => onDeleteDeliverable(index)}
-                        type="button"
-                        disabled={deliverablePickerFrozen}
-                      >
-                        Delete
-                      </button>
+                      {!deliverablePickerFrozen ? (
+                        <button
+                          className="button button-ghost button-tiny"
+                          onClick={() => onDeleteDeliverable(index)}
+                          type="button"
+                        >
+                          Delete
+                        </button>
+                      ) : null}
                     </div>
                   </article>
                 );

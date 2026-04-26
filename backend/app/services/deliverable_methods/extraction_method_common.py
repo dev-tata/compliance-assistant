@@ -372,16 +372,61 @@ def compute_deliverable_confidence(
     return round(min(0.98, max(0.0, score)), 4)
 
 
+def compute_deliverable_weight(
+    item: DeliverableItem,
+    *,
+    section: dict[str, Any] | None = None,
+) -> float:
+    semantic_text = normalize_whitespace(
+        " ".join(
+            part
+            for part in (
+                item.heading_title,
+                item.requirement_text,
+                item.source_quote,
+                section.get("text", "") if section else "",
+            )
+            if normalize_whitespace(part)
+        )
+    ).lower()
+
+    if "risk control" in semantic_text or "residual risk" in semantic_text:
+        return 1.5
+    if (
+        "criticality" in semantic_text
+        or "complexity" in semantic_text
+        or "overall risk classification" in semantic_text
+    ):
+        return 1.2
+    if "major system functions" in semantic_text or "risk identification" in semantic_text:
+        return 1.1
+    if (
+        "scope" in semantic_text
+        or "responsibilit" in semantic_text
+        or "version history" in semantic_text
+    ):
+        return 0.8
+
+    if item.requirement_type == "approval_or_signoff":
+        return 1.1
+    if item.requirement_type == "change_control":
+        return 1.1
+
+    return 1.0
+
+
 def _normalize_item(item: DeliverableItem, *, section: dict[str, Any] | None = None) -> DeliverableItem:
     requirement_text = normalize_whitespace(item.requirement_text)
     source_quote = normalize_whitespace(item.source_quote)
     validated_confidence = compute_deliverable_confidence(item, section=section)
+    weight = compute_deliverable_weight(item, section=section)
     return item.model_copy(
         update={
             "section_label": item.section_label.strip(),
             "heading_title": normalize_whitespace(item.heading_title),
             "requirement_text": requirement_text,
             "source_quote": "" if source_quote == requirement_text else source_quote,
+            "weight": weight,
             "validated_confidence": validated_confidence,
         }
     )
