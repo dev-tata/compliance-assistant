@@ -189,6 +189,19 @@ function getComplianceStages(compliance: ComplianceResponse) {
   return fallbackStages;
 }
 
+function applyFrozenDeliverableConfidence(
+  items: DeliverableItem[],
+  frozen: boolean,
+): DeliverableItem[] {
+  if (!frozen) {
+    return items;
+  }
+  return items.map((item) => ({
+    ...item,
+    validated_confidence: item.validated_confidence,
+  }));
+}
+
 function renderAssessmentBar({
   completionPercent,
   overallAssessment,
@@ -251,36 +264,6 @@ function renderEvidenceList(
       ${item.stage_label ? ` <span class="evidence-stage">${escapeHtml(item.stage_label)}</span>` : ""}
     </li>
   `).join("");
-}
-
-function computeDeliverableConfidence(item: DeliverableItem): number {
-  let score = 0.28;
-  const requirementText = item.requirement_text.trim().replace(/\s+/g, " ");
-  const sourceQuote = item.source_quote.trim().replace(/\s+/g, " ");
-
-  if (item.mandatory) score += 0.1;
-  if (item.section_label.trim()) score += 0.07;
-  if (item.heading_title.trim()) score += 0.07;
-  if (item.source_document.trim()) score += 0.05;
-  if (/\b(shall|must|required|needs to)\b/i.test(requirementText)) score += 0.12;
-  if (sourceQuote) score += 0.1;
-
-  const reqWords = new Set((requirementText.toLowerCase().match(/[a-z0-9]+/g) ?? []));
-  const quoteWords = new Set((sourceQuote.toLowerCase().match(/[a-z0-9]+/g) ?? []));
-  if (reqWords.size > 0 && quoteWords.size > 0) {
-    let overlapCount = 0;
-    for (const word of reqWords) {
-      if (quoteWords.has(word)) overlapCount += 1;
-    }
-    const overlap = overlapCount / reqWords.size;
-    score += Math.min(0.12, overlap * 0.12);
-  }
-
-  const wordCount = requirementText ? requirementText.split(/\s+/).length : 0;
-  if (wordCount >= 6 && wordCount <= 30) score += 0.08;
-  else if (wordCount > 0 && (wordCount < 4 || wordCount > 45)) score -= 0.08;
-
-  return Math.max(0, Math.min(0.98, Number(score.toFixed(4))));
 }
 
 function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string): void {
@@ -954,8 +937,14 @@ export default function App() {
     setError("");
     try {
       const result = await getLatestDocumentDeliverables(storedFilename);
-      setDeliverablePicker(result);
-      setEditableDeliverables(result.deliverables);
+      const document = documents.find((item) => item.stored_filename === storedFilename);
+      const frozen = document?.document_type === "procedure" && document.frozen;
+      const normalizedDeliverables = applyFrozenDeliverableConfidence(result.deliverables, frozen);
+      setDeliverablePicker({
+        ...result,
+        deliverables: normalizedDeliverables,
+      });
+      setEditableDeliverables(normalizedDeliverables);
       const documentKey = result.source_filename ?? storedFilename;
       setSelectedDeliverablesByDocument((current) => {
         if (current[documentKey]) {
@@ -999,6 +988,18 @@ export default function App() {
             }
           : null,
       );
+      if (deliverablePicker?.document_stored_filename === storedFilename) {
+        const normalizedDeliverables = applyFrozenDeliverableConfidence(editableDeliverables, frozen);
+        setDeliverablePicker((current) => (
+          current
+            ? {
+                ...current,
+                deliverables: normalizedDeliverables,
+              }
+            : current
+        ));
+        setEditableDeliverables(normalizedDeliverables);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Freeze update failed");
     } finally {
@@ -1020,10 +1021,7 @@ export default function App() {
           ...item,
           [field]: value,
         };
-        return {
-          ...updated,
-          confidence: computeDeliverableConfidence(updated),
-        };
+        return updated;
       }),
     );
   }
@@ -1044,7 +1042,7 @@ export default function App() {
         source_quote: "",
         source_document: sourceDocument,
         required_by_procedure: true,
-        confidence: 0,
+        validated_confidence: 0,
       },
     ]);
   }
@@ -1415,7 +1413,11 @@ export default function App() {
                         onChange={(e) => onDeliverableFieldChange(index, "requirement_text", e.target.value)}
                         disabled={deliverablePickerFrozen}
                       />
-                      <span className="requirement-confidence">{(item.confidence * 100).toFixed(1)}%</span>
+                      {deliverablePickerFrozen ? (
+                        <span className="requirement-confidence">
+                          {(item.validated_confidence * 100).toFixed(1)}%
+                        </span>
+                      ) : null}
                       <button
                         className="button button-ghost button-tiny"
                         onClick={() => onDeleteDeliverable(index)}

@@ -364,6 +364,10 @@ def compute_deliverable_confidence(
             score += 0.05
         if should_skip_heading(item.heading_title, section.get("text")):
             score -= 0.15
+        if _introduces_documentation_inference(requirement_text, source_quote):
+            score -= 0.18
+        if _introduces_evaluation_inference(requirement_text, source_quote):
+            score -= 0.12
 
     return round(min(0.98, max(0.0, score)), 4)
 
@@ -371,13 +375,14 @@ def compute_deliverable_confidence(
 def _normalize_item(item: DeliverableItem, *, section: dict[str, Any] | None = None) -> DeliverableItem:
     requirement_text = normalize_whitespace(item.requirement_text)
     source_quote = normalize_whitespace(item.source_quote)
+    validated_confidence = compute_deliverable_confidence(item, section=section)
     return item.model_copy(
         update={
             "section_label": item.section_label.strip(),
             "heading_title": normalize_whitespace(item.heading_title),
             "requirement_text": requirement_text,
             "source_quote": "" if source_quote == requirement_text else source_quote,
-            "confidence": compute_deliverable_confidence(item, section=section),
+            "validated_confidence": validated_confidence,
         }
     )
 
@@ -401,6 +406,47 @@ def _quote_matches_section(source_quote: str, section: dict[str, Any]) -> bool:
 def _normalized_match_text(value: Any) -> str:
     text = normalize_whitespace(str(value or ""))
     return re.sub(r"\s+", " ", text).lower()
+
+
+def _introduces_documentation_inference(requirement_text: str, source_quote: str) -> bool:
+    requirement = requirement_text.lower()
+    quote = source_quote.lower()
+
+    documentation_markers = (
+        "shall be documented",
+        "shall document",
+        "shall be recorded",
+        "shall record",
+    )
+    if not any(marker in requirement for marker in documentation_markers):
+        return False
+    if any(marker in quote for marker in documentation_markers):
+        return False
+
+    weaker_quote_markers = (
+        "is determined",
+        "shall be implemented",
+        "must be deemed acceptable",
+        "shall be used",
+    )
+    return any(marker in quote for marker in weaker_quote_markers)
+
+
+def _introduces_evaluation_inference(requirement_text: str, source_quote: str) -> bool:
+    requirement = requirement_text.lower()
+    quote = source_quote.lower()
+
+    if "whether" not in requirement and "acceptable after" not in requirement:
+        return False
+    if "whether" in quote:
+        return False
+
+    quote_markers = (
+        "must be deemed acceptable",
+        "shall be used",
+        "is determined",
+    )
+    return any(marker in quote for marker in quote_markers)
 
 
 def _looks_broad(item: DeliverableItem) -> bool:
@@ -439,7 +485,7 @@ def _deduplicate(items: list[DeliverableItem]) -> list[DeliverableItem]:
     for item in items:
         key = _dedupe_key(item)
         existing = deduped.get(key)
-        if existing is None or item.confidence > existing.confidence:
+        if existing is None or item.validated_confidence > existing.validated_confidence:
             deduped[key] = item
     return sorted(
         deduped.values(),

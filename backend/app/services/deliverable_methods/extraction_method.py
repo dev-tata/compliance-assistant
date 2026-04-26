@@ -207,7 +207,7 @@ def _coerce_item(item: dict[str, Any], section: dict[str, Any]) -> DeliverableIt
         source_quote=source_quote,
         source_document=source_document,
         required_by_procedure=True,
-        confidence=0.0,
+        validated_confidence=0.0,
     )
 
 

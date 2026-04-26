@@ -354,10 +354,6 @@ def get_document_extraction_payload(stored_filename: str) -> dict[str, Any]:
 
 
 def get_latest_document_deliverable_result(stored_filename: str) -> DeliverableExtractionResponse:
-    from app.services.deliverable_methods.extraction_method_common import (
-        compute_deliverable_confidence,
-    )
-
     registry = load_document_registry()
     _, item = find_document_or_404(registry, stored_filename)
     document = DocumentRecord(**item)
@@ -382,16 +378,20 @@ def get_latest_document_deliverable_result(stored_filename: str) -> DeliverableE
     payload.setdefault("source_filename", document.source_filename)
 
     response = DeliverableExtractionResponse(**payload)
+    parsed_payload = _load_parsed_json_file(document)
     normalized_deliverables = [
         item.model_copy(
             update={
-                "confidence": compute_deliverable_confidence(item),
+                "validated_confidence": _compute_validated_deliverable_confidence(
+                    item,
+                    parsed_payload=parsed_payload,
+                ),
             }
         )
         for item in response.deliverables
     ]
     if any(
-        abs(item.confidence - normalized.confidence) > 1e-9
+        abs(item.validated_confidence - normalized.validated_confidence) > 1e-9
         for item, normalized in zip(response.deliverables, normalized_deliverables)
     ):
         response = response.model_copy(update={"deliverables": normalized_deliverables})
@@ -409,10 +409,6 @@ def update_latest_document_deliverable_result(
     stored_filename: str,
     deliverables: list[DeliverableItem],
 ) -> DeliverableExtractionResponse:
-    from app.services.deliverable_methods.extraction_method_common import (
-        compute_deliverable_confidence,
-    )
-
     registry = load_document_registry()
     _, item = find_document_or_404(registry, stored_filename)
     document = DocumentRecord(**item)
@@ -432,10 +428,14 @@ def update_latest_document_deliverable_result(
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=500, detail="Deliverable extraction file corrupted") from exc
 
+    parsed_payload = _load_parsed_json_file(document)
     normalized_deliverables = [
         item.model_copy(
             update={
-                "confidence": compute_deliverable_confidence(item),
+                "validated_confidence": _compute_validated_deliverable_confidence(
+                    item,
+                    parsed_payload=parsed_payload,
+                ),
             }
         )
         for item in deliverables
@@ -462,10 +462,6 @@ def update_latest_document_deliverable_result(
 
 
 def list_document_deliverable_results(stored_filename: str) -> list[DeliverableExtractionResponse]:
-    from app.services.deliverable_methods.extraction_method_common import (
-        compute_deliverable_confidence,
-    )
-
     registry = load_document_registry()
     _, item = find_document_or_404(registry, stored_filename)
     document = DocumentRecord(**item)
@@ -489,6 +485,7 @@ def list_document_deliverable_results(stored_filename: str) -> list[DeliverableE
             history_paths = sorted(legacy_document_history_dir.glob("*.json"), reverse=True)
 
     responses: list[DeliverableExtractionResponse] = []
+    parsed_payload = _load_parsed_json_file(document)
     for path in history_paths:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -507,13 +504,16 @@ def list_document_deliverable_results(stored_filename: str) -> list[DeliverableE
         normalized_deliverables = [
             item.model_copy(
                 update={
-                    "confidence": compute_deliverable_confidence(item),
+                    "validated_confidence": _compute_validated_deliverable_confidence(
+                        item,
+                        parsed_payload=parsed_payload,
+                    ),
                 }
             )
             for item in response.deliverables
         ]
         if any(
-            abs(item.confidence - normalized.confidence) > 1e-9
+            abs(item.validated_confidence - normalized.validated_confidence) > 1e-9
             for item, normalized in zip(response.deliverables, normalized_deliverables)
         ):
             response = response.model_copy(update={"deliverables": normalized_deliverables})
@@ -611,3 +611,82 @@ def _load_parsed_json_file(document: DocumentRecord) -> dict[str, Any]:
             status_code=500,
             detail=f"Parsed JSON file corrupted for document {document.stored_filename}",
         ) from exc
+
+
+def _compute_validated_deliverable_confidence(
+    item: DeliverableItem,
+    *,
+    parsed_payload: dict[str, Any],
+) -> float:
+    from app.services.deliverable_methods.extraction_method_common import (
+        compute_deliverable_confidence,
+    )
+
+    section = _resolve_deliverable_source_section(item, parsed_payload=parsed_payload)
+    return compute_deliverable_confidence(item, section=section if section is not None else None)
+
+
+def _resolve_deliverable_source_section(
+    item: DeliverableItem,
+    *,
+    parsed_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    sections = _flatten_parsed_sections(
+        parsed_payload.get("sections", []),
+        source_document=parsed_payload.get("source_filename") or item.source_document,
+    )
+    source_key = _normalized_text(item.source_document)
+    section_label_key = _normalized_text(item.section_label)
+    heading_key = _normalized_text(item.heading_title)
+
+    for section in sections:
+        if (
+            _normalized_text(section.get("source_document")) == source_key
+            and _normalized_text(section.get("section_label")) == section_label_key
+            and _normalized_text(section.get("heading_title")) == heading_key
+        ):
+            return section
+
+    for section in sections:
+        if (
+            _normalized_text(section.get("source_document")) == source_key
+            and _normalized_text(section.get("section_label")) == section_label_key
+        ):
+            return section
+
+    return None
+
+
+def _flatten_parsed_sections(
+    sections: list[dict[str, Any]],
+    *,
+    source_document: str,
+    parent_headings: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    lineage = parent_headings or []
+    for section in sections:
+        heading_title = _normalized_text(section.get("heading_title"))
+        headings = [*lineage, heading_title] if heading_title else [*lineage]
+        combined_heading = " / ".join(part for part in headings if part)
+        flattened.append(
+            {
+                "source_document": source_document,
+                "section_label": section.get("section_label"),
+                "heading_title": combined_heading or section.get("heading_title") or "",
+                "text": section.get("text"),
+                "tables": section.get("tables", []),
+            }
+        )
+        flattened.extend(
+            _flatten_parsed_sections(
+                section.get("subsections", []),
+                source_document=source_document,
+                parent_headings=headings,
+            )
+        )
+    return flattened
+
+
+def _normalized_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).strip().lower()
