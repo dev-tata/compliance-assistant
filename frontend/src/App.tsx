@@ -249,7 +249,6 @@ function renderEvidenceList(
     <li>
       ${escapeHtml(item.text)}
       ${item.stage_label ? ` <span class="evidence-stage">${escapeHtml(item.stage_label)}</span>` : ""}
-      ${item.source_documents.length ? ` <span class="evidence-sources">(${escapeHtml(item.source_documents.join(", "))})</span>` : ""}
     </li>
   `).join("");
 }
@@ -331,7 +330,7 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
         </div>
       </header>
       <div class="finding-metrics">
-        <span><strong>Sources:</strong> ${escapeHtml(finding.source_documents.join(", ") || "none")}</span>
+        <span><strong>Source:</strong> ${escapeHtml(finding.source_documents.join(", ") || "none")}</span>
         <span><strong>Evidence strength:</strong> ${(finding.evidence_strength * 100).toFixed(1)}% · <strong>Weight:</strong> ${finding.weight.toFixed(1)}</span>
       </div>
       <ul>${renderEvidenceList(finding)}</ul>
