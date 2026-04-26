@@ -54,6 +54,7 @@ class ComplianceSummary(BaseModel):
     method: str = "non_rag"
     overall_assessment: str
     completion_percent: int = Field(default=0, ge=0, le=100)
+    m2_ordinal_score: float = Field(default=0.0, ge=0.0)
     satisfied_count: int = Field(default=0, ge=0)
     partial_count: int = Field(default=0, ge=0)
     not_satisfied_count: int = Field(default=0, ge=0)

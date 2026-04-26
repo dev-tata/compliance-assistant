@@ -63,6 +63,7 @@ export type ComplianceSummary = {
   method: ComplianceMethod;
   overall_assessment: string;
   completion_percent: number;
+  m2_ordinal_score: number;
   satisfied_count: number;
   partial_count: number;
   not_satisfied_count: number;

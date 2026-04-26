@@ -116,27 +116,6 @@ function getAnalysisFindings(
     : analysis.findings;
 }
 
-function computeCompliancePercent(
-  procedureToRecord: ComplianceResponse["analysis"]["procedure_to_record"] | ComplianceResponse["analysis"]["findings"],
-): number {
-  if (!procedureToRecord?.length) {
-    return 0;
-  }
-
-  const statusScores = {
-    satisfied: 100,
-    partial: 50,
-    not_satisfied: 0,
-  } as const;
-
-  const totalScore = procedureToRecord.reduce(
-    (sum, finding) => sum + statusScores[finding.status],
-    0,
-  );
-
-  return Math.round(totalScore / procedureToRecord.length);
-}
-
 function formatRecallMetric(value: number): string {
   return `${value.toFixed(4)} / 1.0`;
 }
@@ -204,21 +183,20 @@ function applyFrozenDeliverableConfidence(
 }
 
 function renderAssessmentBar({
-  completionPercent,
   overallAssessment,
   scores,
   retrievalMetrics,
   statusSummary,
 }: {
-  completionPercent: number;
   overallAssessment: string;
   scores: ComplianceResponse["scores"];
   retrievalMetrics?: ComplianceResponse["retrieval_metrics"] | ComplianceResponse["baseline_retrieval_metrics"] | null;
   statusSummary: Record<"satisfied" | "partial" | "not_satisfied", number>;
 }): string {
+  const completedPercent = Math.round(scores.m2_ordinal_score * 100);
   return `
     <div class="assessment">
-      <span class="assessment-item assessment-item-edge-left">Completed <strong>${completionPercent}%</strong></span>
+      <span class="assessment-item assessment-item-edge-left">Completed <strong>${completedPercent}%</strong></span>
       <span class="assessment-item assessment-status-item">
         <span class="status status-satisfied">Satisfied</span>
         <span class="assessment-status-count">${statusSummary.satisfied}</span>
@@ -274,18 +252,15 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
   }
 
   const procedureToRecord = getAnalysisFindings(compliance.analysis);
-  const compliancePercent = computeCompliancePercent(procedureToRecord);
   const statusSummary = summarizeStatuses(procedureToRecord);
   const stages = getComplianceStages(compliance);
   const stageCards = stages.map((stage) => {
     const stageFindings = getAnalysisFindings(stage.analysis);
-    const stagePercent = computeCompliancePercent(stageFindings);
     const stageStatusSummary = summarizeStatuses(stageFindings);
     return `
       <div class="comparison-card">
         <h2>${escapeHtml(stage.stage_label)}</h2>
         ${renderAssessmentBar({
-          completionPercent: stage.analysis.completion_percent ?? stagePercent,
           overallAssessment: stage.analysis.overall_assessment,
           scores: stage.scores,
           retrievalMetrics: stage.retrieval_metrics,
@@ -526,7 +501,6 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
               <div class="comparison-card">
                 <h2>${escapeHtml(formatMethodLabel(compliance.method))}</h2>
                 ${renderAssessmentBar({
-                  completionPercent: compliance.analysis.completion_percent ?? compliancePercent,
                   overallAssessment: compliance.analysis.overall_assessment,
                   scores: compliance.scores,
                   retrievalMetrics: compliance.retrieval_metrics,

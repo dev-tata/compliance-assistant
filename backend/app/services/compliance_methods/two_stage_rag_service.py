@@ -99,7 +99,6 @@ def run_two_stage_rag_compliance(
     stage_2 = _run_stage_2_record_retrieval(
         llm_service=llm_service,
         deliverables=deliverables,
-        previous_analysis=stage_1.analysis,
         instructions=request.instructions,
         allowed_record_documents=allowed_record_documents,
         retrieved_payload=retrieved_payload,
@@ -229,7 +228,6 @@ def _run_stage_2_record_retrieval(
     *,
     llm_service: Any,
     deliverables: list[dict[str, Any]],
-    previous_analysis: ComplianceAnalysis,
     instructions: str | None,
     allowed_record_documents: set[str],
     retrieved_payload: list[dict[str, Any]],
@@ -241,16 +239,16 @@ def _run_stage_2_record_retrieval(
             "requirement_source": "deliverables",
             "requirement_evaluations": _build_stage_evaluations(
                 deliverables=deliverables,
-                baseline_analysis=previous_analysis,
+                baseline_analysis=None,
                 retrieved_payload=retrieved_payload,
                 include_reference_context=False,
+                include_baseline=False,
                 include_feedback=False,
             ),
             "workflow_rules": [
-                "Start from the provided baseline assessment for each requirement.",
                 "Treat the original deliverable as the canonical requirement source.",
                 "Use retrieved_record_sections only as admissible evidence.",
-                "Keep or improve each baseline assessment, but do not downgrade it.",
+                "Evaluate each requirement from scratch using only the deliverable and retrieved_record_sections.",
             ],
         },
         instructions=instructions,
@@ -261,9 +259,8 @@ def _run_stage_2_record_retrieval(
         method="record_retrieval_stage",
         expected_count=len(deliverables),
     )
-    analysis = _merge_stage_analysis(
+    analysis = _normalize_retrieval_stage_analysis(
         candidate_analysis=raw_analysis,
-        previous_analysis=previous_analysis,
         retrieved_payload=retrieved_payload,
         allowed_record_documents=allowed_record_documents,
         stage_key=STAGE_2_KEY,
@@ -305,6 +302,7 @@ def _run_stage_3_reference_retrieval(
                 baseline_analysis=previous_analysis,
                 retrieved_payload=retrieved_payload,
                 include_reference_context=True,
+                include_baseline=True,
                 include_feedback=False,
             ),
             "workflow_rules": [
@@ -349,34 +347,87 @@ def _run_stage_3_reference_retrieval(
 def _build_stage_evaluations(
     *,
     deliverables: list[dict[str, Any]],
-    baseline_analysis: ComplianceAnalysis,
+    baseline_analysis: ComplianceAnalysis | None,
     retrieved_payload: list[dict[str, Any]],
     include_reference_context: bool,
+    include_baseline: bool,
     include_feedback: bool,
 ) -> list[dict[str, Any]]:
-    findings = baseline_analysis.procedure_to_record or baseline_analysis.findings
-    rows = baseline_analysis.linked_rows
+    findings = (baseline_analysis.procedure_to_record or baseline_analysis.findings) if baseline_analysis else []
+    rows = baseline_analysis.linked_rows if baseline_analysis else []
     evaluations: list[dict[str, Any]] = []
     for index, deliverable in enumerate(deliverables):
-        finding = findings[index] if index < len(findings) else None
-        row = rows[index] if index < len(rows) else None
         payload = retrieved_payload[index] if index < len(retrieved_payload) else {}
         item = {
             "requirement_ref": f"REQ-{index + 1}",
             "deliverable": serialize_deliverable_for_prompt(deliverable),
-            "baseline_assessment": {
+            "retrieved_record_sections": payload.get("retrieved_record_sections", []),
+        }
+        if include_baseline:
+            finding = findings[index] if index < len(findings) else None
+            row = rows[index] if index < len(rows) else None
+            item["baseline_assessment"] = {
                 "status": finding.status if finding else "not_satisfied",
                 "evidence": finding.evidence if finding else [],
                 "source_documents": finding.source_documents if finding else [],
                 "gap": row.gap if include_feedback and row else "",
                 "recommendation": row.recommendation if include_feedback and row else "",
-            },
-            "retrieved_record_sections": payload.get("retrieved_record_sections", []),
-        }
+            }
         if include_reference_context:
             item["retrieved_requirement_context"] = payload.get("retrieved_requirement_context", [])
         evaluations.append(item)
     return evaluations
+
+
+def _normalize_retrieval_stage_analysis(
+    *,
+    candidate_analysis: ComplianceAnalysis,
+    retrieved_payload: list[dict[str, Any]],
+    allowed_record_documents: set[str],
+    stage_key: str,
+    stage_label: str,
+    requirement_weights: list[float] | None = None,
+) -> ComplianceAnalysis:
+    candidate_findings = candidate_analysis.procedure_to_record or candidate_analysis.findings
+    candidate_rows = candidate_analysis.linked_rows
+
+    normalized_findings: list[ComplianceFinding] = []
+    normalized_rows: list[ComplianceLinkedRow] = []
+    for index, candidate_finding in enumerate(candidate_findings):
+        candidate_row = candidate_rows[index] if index < len(candidate_rows) else None
+        retrieved_sections = retrieved_payload[index].get("retrieved_record_sections", [])
+        normalized_finding = normalize_requirement_finding(
+            finding=candidate_finding,
+            retrieved_record_sections=retrieved_sections,
+            allowed_record_documents=allowed_record_documents,
+        )
+        tagged_finding = _tag_finding_evidence(
+            finding=normalized_finding,
+            previous_finding=normalized_finding.model_copy(update={"evidence_items": []}),
+            stage_key=stage_key,
+            stage_label=stage_label,
+        )
+        normalized_findings.append(tagged_finding)
+        normalized_rows.append(
+            normalize_requirement_linked_row(
+                finding=tagged_finding,
+                row=candidate_row,
+            )
+        )
+
+    analysis = assemble_compliance_analysis(
+        findings=normalized_findings,
+        linked_rows=apply_row_level_record_recall(
+            linked_rows=normalized_rows,
+            findings=normalized_findings,
+            retrieved_payload=retrieved_payload,
+        ),
+    )
+    analysis = enrich_analysis_for_scoring(
+        analysis,
+        requirement_weights=requirement_weights,
+    )
+    return apply_computed_overall_assessment(analysis)
 
 
 def _merge_stage_analysis(

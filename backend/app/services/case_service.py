@@ -406,6 +406,10 @@ def _load_compliance_summary(path: Path, *, fallback_case_id: str) -> Compliance
     analysis_payload = _normalize_compliance_analysis_payload(payload.get("analysis", {}))
     status_counts = _compute_compliance_status_counts(analysis_payload)
     scores_payload = payload.get("scores", {}) if isinstance(payload.get("scores", {}), dict) else {}
+    m2_ordinal_score = _resolve_compliance_summary_m2(
+        scores_payload=scores_payload,
+        analysis_payload=analysis_payload,
+    )
 
     return ComplianceSummary(
         case_id=payload.get("case_id", fallback_case_id),
@@ -417,6 +421,7 @@ def _load_compliance_summary(path: Path, *, fallback_case_id: str) -> Compliance
         method=payload.get("method", "non_rag"),
         overall_assessment=analysis_payload.get("overall_assessment", "unknown"),
         completion_percent=analysis_payload.get("completion_percent", 0),
+        m2_ordinal_score=m2_ordinal_score,
         satisfied_count=status_counts["satisfied"],
         partial_count=status_counts["partial"],
         not_satisfied_count=status_counts["not_satisfied"],
@@ -457,6 +462,19 @@ def _compute_compliance_status_counts(payload: dict[str, Any]) -> dict[str, int]
     for finding in findings:
         counts[finding.status] += 1
     return counts
+
+
+def _resolve_compliance_summary_m2(*, scores_payload: dict[str, Any], analysis_payload: dict[str, Any]) -> float:
+    raw_m2 = scores_payload.get("m2_ordinal_score")
+    if isinstance(raw_m2, (int, float)):
+        return round(float(raw_m2), 4)
+
+    completion_percent = analysis_payload.get("completion_percent", 0)
+    if isinstance(completion_percent, (int, float)):
+        normalized_completion = max(0.0, min(float(completion_percent), 100.0))
+        return round(normalized_completion / 100.0, 4)
+
+    return 0.0
 
 
 def _parse_documents(
