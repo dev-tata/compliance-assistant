@@ -11,3 +11,7 @@ class LLMConfigurationError(LLMError):
 
 class LLMGenerationError(LLMError):
     """Raised when a provider call fails during text generation."""
+
+
+class LLMQuotaExceededError(LLMGenerationError):
+    """Raised when a provider rejects a request due to quota, rate, or spend limits."""

@@ -6,7 +6,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 ComplianceStatus = Literal["satisfied", "partial", "not_satisfied"]
-ComplianceMethod = Literal["non_rag", "single_source_rag", "multi_source_rag"]
+ComplianceMethod = Literal["non_rag", "two_stage_rag"]
 ComplianceRequirementSource = Literal["auto", "procedure_sections", "deliverables"]
 
 class ComplianceRequest(BaseModel):
@@ -21,7 +21,7 @@ class ComplianceRequest(BaseModel):
 
     @model_validator(mode="after")
     def normalize_requirement_source(self) -> "ComplianceRequest":
-        if self.method in {"non_rag", "single_source_rag", "multi_source_rag"}:
+        if self.method in {"non_rag", "two_stage_rag"}:
             self.requirement_source = "deliverables"
         return self
 
@@ -40,6 +40,7 @@ class ComplianceFinding(BaseModel):
     status: ComplianceStatus
     evidence: list[str] = Field(default_factory=list)
     source_documents: list[str] = Field(default_factory=list)
+    evidence_items: list["ComplianceEvidenceItem"] = Field(default_factory=list)
     evidence_strength: float = Field(default=0.0, ge=0.0, le=1.0)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     weight: float = Field(default=1.0, gt=0.0)
@@ -52,6 +53,30 @@ class ComplianceFinding(BaseModel):
         data = dict(data)
         data["status"] = _normalize_compliance_status(data.get("status"))
         data["evidence"] = _normalize_string_list(data.get("evidence"))
+        data["source_documents"] = _normalize_string_list(data.get("source_documents"))
+        if not data.get("evidence_items") and data.get("evidence"):
+            data["evidence_items"] = [
+                {"text": text, "source_documents": data["source_documents"]}
+                for text in data["evidence"]
+            ]
+        return data
+
+
+class ComplianceEvidenceItem(BaseModel):
+    text: str
+    source_documents: list[str] = Field(default_factory=list)
+    stage_key: str | None = None
+    stage_label: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_evidence_item(cls, data: object) -> object:
+        if isinstance(data, str):
+            return {"text": data}
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        data["text"] = str(data.get("text") or "").strip()
         data["source_documents"] = _normalize_string_list(data.get("source_documents"))
         return data
 
@@ -134,6 +159,15 @@ class RetrievalMetrics(BaseModel):
     hit_requirements: int = Field(default=0, ge=0)
 
 
+class ComplianceStageResult(BaseModel):
+    stage_key: str
+    stage_label: str
+    method: str
+    analysis: ComplianceAnalysis
+    scores: ComplianceScores
+    retrieval_metrics: RetrievalMetrics | None = None
+
+
 class ComplianceResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -156,6 +190,11 @@ class ComplianceResponse(BaseModel):
     scores: ComplianceScores
     section_matches: list[SectionMatch] = Field(default_factory=list)
     retrieval_metrics: RetrievalMetrics | None = None
+    stages: list[ComplianceStageResult] = Field(default_factory=list)
+    baseline_method: str | None = None
+    baseline_analysis: ComplianceAnalysis | None = None
+    baseline_scores: ComplianceScores | None = None
+    baseline_retrieval_metrics: RetrievalMetrics | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -174,8 +213,8 @@ def _normalize_status_value(value: object) -> str:
 def _normalize_compliance_method(value: object) -> str:
     normalized = _normalize_status_value(value)
     alias_map = {
-        "simple_rag": "single_source_rag",
-        "nested_rag": "multi_source_rag",
+        "multi_source_rag": "two_stage_rag",
+        "single_call_two_stage_rag": "two_stage_rag",
     }
     return alias_map.get(normalized, normalized)
 

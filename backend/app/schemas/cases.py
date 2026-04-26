@@ -14,6 +14,10 @@ class CaseCreate(BaseModel):
     notes: str | None = None
 
 
+class CaseRecordDocumentsUpdate(BaseModel):
+    record_stored_filenames: list[str] = Field(default_factory=list)
+
+
 class CaseRecord(BaseModel):
     case_id: str
     created_at: str | None = None
@@ -50,4 +54,9 @@ class ComplianceSummary(BaseModel):
     method: str = "non_rag"
     overall_assessment: str
     completion_percent: int = Field(default=0, ge=0, le=100)
+    satisfied_count: int = Field(default=0, ge=0)
+    partial_count: int = Field(default=0, ge=0)
+    not_satisfied_count: int = Field(default=0, ge=0)
+    m3_evidence_weighted_score: float = Field(default=0.0, ge=0.0)
+    m5_grounding_score: float = Field(default=0.0, ge=0.0)
     reference_stored_filenames: list[str] = Field(default_factory=list)

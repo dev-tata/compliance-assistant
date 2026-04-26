@@ -63,10 +63,15 @@ export type ComplianceSummary = {
   method: ComplianceMethod;
   overall_assessment: string;
   completion_percent: number;
+  satisfied_count: number;
+  partial_count: number;
+  not_satisfied_count: number;
+  m3_evidence_weighted_score: number;
+  m5_grounding_score: number;
   reference_stored_filenames: string[];
 };
 
-export type ComplianceMethod = "non_rag" | "single_source_rag" | "multi_source_rag";
+export type ComplianceMethod = "non_rag" | "two_stage_rag";
 
 export type ComplianceStatus = "satisfied" | "partial" | "not_satisfied";
 
@@ -75,9 +80,17 @@ export type ComplianceFinding = {
   status: ComplianceStatus;
   evidence: string[];
   source_documents: string[];
+  evidence_items?: ComplianceEvidenceItem[];
   evidence_strength: number;
   confidence: number;
   weight: number;
+};
+
+export type ComplianceEvidenceItem = {
+  text: string;
+  source_documents: string[];
+  stage_key?: string | null;
+  stage_label?: string | null;
 };
 
 export type ComplianceLinkedRow = {
@@ -123,6 +136,15 @@ export type RetrievalMetrics = {
   hit_requirements: number;
 };
 
+export type ComplianceStageResult = {
+  stage_key: string;
+  stage_label: string;
+  method: string;
+  analysis: ComplianceAnalysis;
+  scores: ComplianceScores;
+  retrieval_metrics?: RetrievalMetrics | null;
+};
+
 export type ComplianceResponse = {
   case_id: string;
   compliance_provider: string;
@@ -137,6 +159,11 @@ export type ComplianceResponse = {
   scores: ComplianceScores;
   section_matches: SectionMatch[];
   retrieval_metrics?: RetrievalMetrics | null;
+  stages?: ComplianceStageResult[];
+  baseline_method?: string | null;
+  baseline_analysis?: ComplianceAnalysis | null;
+  baseline_scores?: ComplianceScores | null;
+  baseline_retrieval_metrics?: RetrievalMetrics | null;
 };
 
 export type DeliverableItem = {

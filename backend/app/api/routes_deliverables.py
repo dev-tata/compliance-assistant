@@ -10,7 +10,11 @@ from app.services.case_service import (
     list_case_deliverables,
 )
 from app.services.deliverable_extraction_service import run_case_deliverable_extraction
-from app.services.llm.errors import LLMConfigurationError, LLMGenerationError
+from app.services.llm.errors import (
+    LLMConfigurationError,
+    LLMGenerationError,
+    LLMQuotaExceededError,
+)
 
 router = APIRouter(prefix="/cases", tags=["deliverables"])
 
@@ -49,5 +53,7 @@ def extract_case_deliverables(case_id: str, request: DeliverableExtractionReques
         raise HTTPException(status_code=501, detail=str(exc)) from exc
     except LLMConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LLMQuotaExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except LLMGenerationError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

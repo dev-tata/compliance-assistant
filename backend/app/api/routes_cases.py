@@ -5,9 +5,16 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 
-from app.schemas.cases import CaseCreate, CaseDocuments, CaseRecord, ComplianceSummary, ParsedCase
+from app.schemas.cases import (
+    CaseCreate,
+    CaseDocuments,
+    CaseRecord,
+    CaseRecordDocumentsUpdate,
+    ComplianceSummary,
+    ParsedCase,
+)
 from app.schemas.compliance import ComplianceRequest, ComplianceResponse
-from app.schemas.documents import DocumentRecord
+from app.schemas.documents import DocumentRecord, is_record_document_type
 from app.services.case_service import (
     _load_parsed_json_file,
     delete_case_compliance_result,
@@ -35,7 +42,11 @@ from app.services.document_service import (
 )
 from app.services.retrieval.record_index_service import prepare_record_indexes
 from app.services.retrieval.reference_index_service import prepare_reference_indexes
-from app.services.llm.errors import LLMConfigurationError, LLMGenerationError
+from app.services.llm.errors import (
+    LLMConfigurationError,
+    LLMGenerationError,
+    LLMQuotaExceededError,
+)
 from app.services.storage_paths import get_case_dir
 
 router = APIRouter(prefix="/cases", tags=["cases"])
@@ -97,6 +108,46 @@ def get_case(case_id: str):
     return CaseRecord(**get_case_or_404(case_id))
 
 
+@router.patch("/{case_id}/records", response_model=CaseRecord)
+def update_case_records(case_id: str, update: CaseRecordDocumentsUpdate):
+    registry = load_case_registry()
+    documents = load_document_registry()
+
+    for index, item in enumerate(registry):
+        if item["case_id"] != case_id:
+            continue
+
+        next_record_filenames: list[str] = []
+        seen: set[str] = set()
+        for stored_filename in update.record_stored_filenames:
+            if not stored_filename or stored_filename in seen:
+                continue
+            _, document_item = find_document_or_404(documents, stored_filename)
+            document = DocumentRecord(**document_item)
+            if not is_record_document_type(document.document_type):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f'Document "{document.source_filename}" is not a record document.',
+                )
+            next_record_filenames.append(stored_filename)
+            seen.add(stored_filename)
+
+        if not next_record_filenames:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one record document is required",
+            )
+
+        registry[index] = {
+            **item,
+            "record_stored_filenames": next_record_filenames,
+        }
+        save_case_registry(registry)
+        return CaseRecord(**registry[index])
+
+    raise HTTPException(status_code=404, detail="Case not found")
+
+
 @router.delete("/{case_id}", response_model=CaseRecord)
 def delete_case(case_id: str):
     registry = load_case_registry()
@@ -142,7 +193,7 @@ def delete_case_compliance_result_by_file(case_id: str, file_name: str):
 @router.post("/{case_id}/compliance", response_model=ComplianceResponse)
 def run_case_compliance(case_id: str, request: ComplianceRequest):
     case_payload = get_case_compliance_payload(case_id)
-    if request.method == "multi_source_rag" and request.additional_document_filenames:
+    if request.method == "two_stage_rag" and request.additional_document_filenames:
         _append_additional_documents(
             case_payload=case_payload,
             additional_document_filenames=request.additional_document_filenames,
@@ -203,6 +254,8 @@ def run_case_compliance(case_id: str, request: ComplianceRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except NotImplementedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LLMQuotaExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except LLMGenerationError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -279,16 +332,16 @@ def _validate_compliance_inputs(*, case_payload: dict, request: ComplianceReques
             detail=f"{request.method} requires retrievable record sections and record indexes.",
         )
 
-    if request.method != "multi_source_rag":
+    if request.method != "two_stage_rag":
         return
 
     if not references:
         raise HTTPException(
             status_code=400,
-            detail="multi_source_rag requires reference documents with retrievable sections.",
+            detail="two_stage_rag requires reference documents with retrievable sections.",
         )
     if not prepare_reference_indexes(references):
         raise HTTPException(
             status_code=400,
-            detail="multi_source_rag requires retrievable reference sections and reference indexes.",
+            detail="two_stage_rag requires retrievable reference sections and reference indexes.",
         )

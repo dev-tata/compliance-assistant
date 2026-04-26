@@ -138,6 +138,21 @@ export async function deleteCase(caseId: string): Promise<CaseRecord> {
   );
 }
 
+export async function updateCaseRecords(input: {
+  caseId: string;
+  recordStoredFilenames: string[];
+}): Promise<CaseRecord> {
+  return handle<CaseRecord>(
+    await fetch(`${API_BASE}/cases/${encodeURIComponent(input.caseId)}/records`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        record_stored_filenames: input.recordStoredFilenames,
+      }),
+    }),
+  );
+}
+
 export async function listCaseCompliances(caseId: string): Promise<ComplianceSummary[]> {
   return handle<ComplianceSummary[]>(
     await fetch(`${API_BASE}/cases/${encodeURIComponent(caseId)}/compliances`),

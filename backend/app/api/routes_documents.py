@@ -24,7 +24,7 @@ from app.services.document_service import (
     UPLOAD_DIR,
     compute_file_hash,
     current_timestamp,
-    ensure_procedure_not_frozen,
+    ensure_document_not_frozen,
     extract_procedure_group_id,
     find_document_by_content_hash,
     find_document_or_404,
@@ -39,7 +39,11 @@ from app.services.document_service import (
     validate_extension,
 )
 from app.services.deliverable_extraction_service import run_document_deliverable_extraction
-from app.services.llm.errors import LLMConfigurationError, LLMGenerationError
+from app.services.llm.errors import (
+    LLMConfigurationError,
+    LLMGenerationError,
+    LLMQuotaExceededError,
+)
 from app.services.retrieval.record_index_service import ensure_record_index
 from app.services.retrieval.reference_index_service import ensure_reference_index
 
@@ -142,7 +146,7 @@ def delete_document(stored_filename: str):
             continue
 
         document = DocumentRecord(**item)
-        ensure_procedure_not_frozen(document, action="deletion")
+        ensure_document_not_frozen(document, action="deletion")
         removed_item = registry.pop(index)
         document = DocumentRecord(**removed_item)
         remove_document_files(document, registry)
@@ -157,8 +161,8 @@ def update_document_freeze(stored_filename: str, request: DocumentFreezeUpdateRe
     registry = load_document_registry()
     index, item = find_document_or_404(registry, stored_filename)
     document = DocumentRecord(**item)
-    if document.document_type != DocumentType.procedure:
-        raise HTTPException(status_code=400, detail="Freeze is supported only for procedure documents.")
+    if document.document_type not in (DocumentType.procedure, DocumentType.reference):
+        raise HTTPException(status_code=400, detail="Freeze is supported only for procedure and reference documents.")
 
     registry[index]["frozen"] = request.frozen
     save_document_registry(registry)
@@ -196,7 +200,7 @@ def get_document_file(stored_filename: str):
 def extract_document_deliverables(stored_filename: str, request: DeliverableExtractionRequest):
     registry = load_document_registry()
     _, item = find_document_or_404(registry, stored_filename)
-    ensure_procedure_not_frozen(DocumentRecord(**item), action="requirement updates")
+    ensure_document_not_frozen(DocumentRecord(**item), action="requirement updates")
     document_payload = get_document_extraction_payload(stored_filename)
 
     try:
@@ -209,6 +213,8 @@ def extract_document_deliverables(stored_filename: str, request: DeliverableExtr
         raise HTTPException(status_code=501, detail=str(exc)) from exc
     except LLMConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LLMQuotaExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except LLMGenerationError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -227,7 +233,7 @@ def get_document_deliverables_history(stored_filename: str):
 def update_latest_document_deliverables(stored_filename: str, request: DeliverableUpdateRequest):
     registry = load_document_registry()
     _, item = find_document_or_404(registry, stored_filename)
-    ensure_procedure_not_frozen(DocumentRecord(**item), action="requirement updates")
+    ensure_document_not_frozen(DocumentRecord(**item), action="requirement updates")
     return update_latest_document_deliverable_result(
         stored_filename,
         request.deliverables,

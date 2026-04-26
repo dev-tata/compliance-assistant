@@ -17,6 +17,7 @@ import {
   listDocuments,
   runCompliance,
   setDocumentFrozen,
+  updateCaseRecords,
   updateLatestDocumentDeliverables,
   uploadDocument,
 } from "./api";
@@ -68,23 +69,13 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
-function renderList(items: string[]): string {
-  if (items.length === 0) {
-    return "<li>None</li>";
-  }
-
-  return items.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
-}
-
 function renderLinkedRows(
   rows: ComplianceResponse["analysis"]["linked_rows"],
   procedureToRecord: ComplianceResponse["analysis"]["procedure_to_record"] | ComplianceResponse["analysis"]["findings"],
-  retrievalK?: number | null,
 ): string {
   if (rows.length === 0) {
     return `
       <tr>
-        <td>None</td>
         <td>None</td>
         <td>None</td>
         <td>None</td>
@@ -100,21 +91,28 @@ function renderLinkedRows(
     const confidenceLabel = typeof confidence === "number"
       ? `${(confidence * 100).toFixed(1)}%`
       : "&mdash;";
-    const recallLabel = typeof row.record_recall_at_k === "number" && retrievalK
-      ? `${row.record_recall_at_k.toFixed(1)}`
-      : "&mdash;";
     return `
     <tr>
       <td>${index + 1}</td>
       <td>${escapeHtml(row.requirement) || "&mdash;"}</td>
       <td>${confidenceLabel}</td>
-      <td>${recallLabel}</td>
       <td>${escapeHtml(row.status) || "&mdash;"}</td>
       <td>${escapeHtml(row.gap) || "&mdash;"}</td>
       <td>${escapeHtml(row.recommendation) || "&mdash;"}</td>
     </tr>
   `;
   }).join("");
+}
+
+function getAnalysisFindings(
+  analysis: ComplianceResponse["analysis"] | NonNullable<ComplianceResponse["stages"]>[number]["analysis"] | null | undefined,
+) {
+  if (!analysis) {
+    return [];
+  }
+  return analysis.procedure_to_record?.length
+    ? analysis.procedure_to_record
+    : analysis.findings;
 }
 
 function computeCompliancePercent(
@@ -136,6 +134,124 @@ function computeCompliancePercent(
   );
 
   return Math.round(totalScore / procedureToRecord.length);
+}
+
+function formatRecallMetric(value: number): string {
+  return `${value.toFixed(4)} / 1.0`;
+}
+
+function summarizeStatuses(
+  procedureToRecord: ComplianceResponse["analysis"]["procedure_to_record"] | ComplianceResponse["analysis"]["findings"],
+): Record<"satisfied" | "partial" | "not_satisfied", number> {
+  if (!procedureToRecord?.length) {
+    return {
+      satisfied: 0,
+      partial: 0,
+      not_satisfied: 0,
+    };
+  }
+  return procedureToRecord.reduce(
+    (counts, finding) => {
+      counts[finding.status] += 1;
+      return counts;
+    },
+    {
+      satisfied: 0,
+      partial: 0,
+      not_satisfied: 0,
+    } as Record<"satisfied" | "partial" | "not_satisfied", number>,
+  );
+}
+
+function getComplianceStages(compliance: ComplianceResponse) {
+  if (compliance.stages?.length) {
+    return compliance.stages;
+  }
+  const fallbackStages = [];
+  if (compliance.baseline_analysis && compliance.baseline_scores) {
+    fallbackStages.push({
+      stage_key: "legacy_baseline",
+      stage_label: formatMethodLabel(compliance.baseline_method ?? "non_rag"),
+      method: compliance.baseline_method ?? "non_rag",
+      analysis: compliance.baseline_analysis,
+      scores: compliance.baseline_scores,
+      retrieval_metrics: compliance.baseline_retrieval_metrics ?? null,
+    });
+  }
+  fallbackStages.push({
+    stage_key: "legacy_final",
+    stage_label: formatMethodLabel(compliance.method),
+    method: compliance.method,
+    analysis: compliance.analysis,
+    scores: compliance.scores,
+    retrieval_metrics: compliance.retrieval_metrics ?? null,
+  });
+  return fallbackStages;
+}
+
+function renderAssessmentBar({
+  completionPercent,
+  overallAssessment,
+  scores,
+  retrievalMetrics,
+  statusSummary,
+}: {
+  completionPercent: number;
+  overallAssessment: string;
+  scores: ComplianceResponse["scores"];
+  retrievalMetrics?: ComplianceResponse["retrieval_metrics"] | ComplianceResponse["baseline_retrieval_metrics"] | null;
+  statusSummary: Record<"satisfied" | "partial" | "not_satisfied", number>;
+}): string {
+  return `
+    <div class="assessment">
+      <span class="assessment-item assessment-item-edge-left">Completed <strong>${completionPercent}%</strong></span>
+      <span class="assessment-item assessment-status-item">
+        <span class="status status-satisfied">Satisfied</span>
+        <span class="assessment-status-count">${statusSummary.satisfied}</span>
+      </span>
+      <span class="assessment-item assessment-status-item">
+        <span class="status status-partial">Partial</span>
+        <span class="assessment-status-count">${statusSummary.partial}</span>
+      </span>
+      <span class="assessment-item assessment-status-item">
+        <span class="status status-not_satisfied">Not_Satisfied</span>
+        <span class="assessment-status-count">${statusSummary.not_satisfied}</span>
+      </span>
+    </div>
+    <div class="assessment">
+      <span class="assessment-item">Evidence Support <strong>${scores.m3_evidence_weighted_score.toFixed(4)}</strong></span>
+      <span class="assessment-item">Grounding Quality <strong>${scores.m5_grounding_score.toFixed(4)}</strong></span>
+      ${(typeof retrievalMetrics?.record_k === "number"
+        && typeof retrievalMetrics?.record_recall_at_k === "number")
+        ? `<span class="assessment-item">Recall@${retrievalMetrics.record_k} <strong>${formatRecallMetric(retrievalMetrics.record_recall_at_k)}</strong></span>`
+        : ""}
+      <span class="assessment-item assessment-item-edge-left">Label: <strong>${escapeHtml(overallAssessment)}</strong></span>
+    </div>
+  `;
+}
+
+function renderEvidenceList(
+  finding: ComplianceResponse["analysis"]["findings"][number],
+): string {
+  const evidenceItems = finding.evidence_items?.length
+    ? finding.evidence_items
+    : finding.evidence.map((text) => ({
+        text,
+        source_documents: finding.source_documents,
+        stage_label: null,
+      }));
+
+  if (!evidenceItems.length) {
+    return "<li>None</li>";
+  }
+
+  return evidenceItems.map((item) => `
+    <li>
+      ${escapeHtml(item.text)}
+      ${item.stage_label ? ` <span class="evidence-stage">${escapeHtml(item.stage_label)}</span>` : ""}
+      ${item.source_documents.length ? ` <span class="evidence-sources">(${escapeHtml(item.source_documents.join(", "))})</span>` : ""}
+    </li>
+  `).join("");
 }
 
 function computeDeliverableConfidence(item: DeliverableItem): number {
@@ -169,15 +285,32 @@ function computeDeliverableConfidence(item: DeliverableItem): number {
 }
 
 function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string): void {
-  const popup = window.open("", "_blank", "width=1280,height=900");
+  const popup = window.open("", "_blank", "width=1080,height=900");
   if (!popup) {
     throw new Error("Popup blocked");
   }
 
-  const procedureToRecord = (compliance.analysis.procedure_to_record?.length
-    ? compliance.analysis.procedure_to_record
-    : compliance.analysis.findings);
+  const procedureToRecord = getAnalysisFindings(compliance.analysis);
   const compliancePercent = computeCompliancePercent(procedureToRecord);
+  const statusSummary = summarizeStatuses(procedureToRecord);
+  const stages = getComplianceStages(compliance);
+  const stageCards = stages.map((stage) => {
+    const stageFindings = getAnalysisFindings(stage.analysis);
+    const stagePercent = computeCompliancePercent(stageFindings);
+    const stageStatusSummary = summarizeStatuses(stageFindings);
+    return `
+      <div class="comparison-card">
+        <h2>${escapeHtml(stage.stage_label)}</h2>
+        ${renderAssessmentBar({
+          completionPercent: stage.analysis.completion_percent ?? stagePercent,
+          overallAssessment: stage.analysis.overall_assessment,
+          scores: stage.scores,
+          retrievalMetrics: stage.retrieval_metrics,
+          statusSummary: stageStatusSummary,
+        })}
+      </div>
+    `;
+  }).join("");
 
   const requirementEvaluations = procedureToRecord.map((finding, index) => `
     ${(() => {
@@ -188,20 +321,20 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
       return `
     <article class="finding requirement-evaluation">
       <header>
-        <div>
+        <div class="finding-title">
           <div class="requirement-label">Requirement ${index + 1}</div>
           <strong>${escapeHtml(finding.requirement)}</strong>
         </div>
-        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-          ${recallLabel ? `<span>${escapeHtml(recallLabel)}</span>` : ""}
+        <div class="finding-header-meta">
           <span class="status status-${escapeHtml(finding.status)}">${escapeHtml(finding.status)}</span>
+          ${recallLabel ? `<span class="finding-recall">${escapeHtml(recallLabel)}</span>` : ""}
         </div>
       </header>
       <div class="finding-metrics">
         <span><strong>Sources:</strong> ${escapeHtml(finding.source_documents.join(", ") || "none")}</span>
         <span><strong>Evidence strength:</strong> ${(finding.evidence_strength * 100).toFixed(1)}% · <strong>Weight:</strong> ${finding.weight.toFixed(1)}</span>
       </div>
-      <ul>${renderList(finding.evidence)}</ul>
+      <ul>${renderEvidenceList(finding)}</ul>
     </article>
   `;
     })()}
@@ -216,38 +349,48 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
         <style>
           body {
             margin: 0;
-            padding: 20px;
+            padding: 16px;
             font-family: Georgia, "Times New Roman", serif;
+            font-size: 13px;
+            line-height: 1.35;
             color: #231b12;
             background: #f3efe4;
           }
+          .page {
+            width: min(1080px, 100%);
+            margin: 0 auto;
+          }
           h1, h2, h3, h4, p { margin-top: 0; }
           h1 { white-space: nowrap; }
-          .head, .findings { display: grid; gap: 12px; }
+          .head, .findings { display: grid; gap: 8px; }
           .head { grid-template-columns: 1fr; align-items: start; }
-          .head-main p { margin-bottom: 18px; }
+          .head-main p { margin-bottom: 12px; font-size: 0.8rem; }
           .case-line { white-space: nowrap; }
           .path-line { margin-top: -6px; }
-          .code { color: #8a3b12; font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+          .code { color: #8a3b12; font-family: ui-monospace, Consolas, monospace; word-break: break-all; font-size: 0.74rem; }
           .assessment, .score-card, .result-list, .finding {
-            padding: 12px 14px;
+            padding: 8px 10px;
             border: 1px solid #d8c8a8;
-            border-radius: 8px;
+            border-radius: 7px;
             background: rgba(255,255,255,0.72);
           }
           .assessment {
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            justify-content: flex-start;
             flex-wrap: wrap;
-            row-gap: 12px;
-            column-gap: 18px;
+            row-gap: 8px;
+            column-gap: 12px;
+          }
+          .assessment + .assessment {
+            margin-top: 12px;
           }
           .assessment-item {
             color: #6f6252;
             text-align: center;
             white-space: nowrap;
             flex: 0 0 auto;
+            font-size: 0.76rem;
           }
           .assessment-item-edge-left {
             text-align: left;
@@ -255,10 +398,19 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
           .assessment-item strong {
             color: #231b12;
           }
+          .assessment-status-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0;
+          }
+          .assessment-status-count {
+            color: #231b12;
+            font-weight: 700;
+          }
           .score-card span, .result-list li, .finding p, .finding li { color: #6f6252; }
-          .section-block { margin-top: 28px; }
+          .section-block { margin-top: 20px; }
           .gap-table-wrap {
-            margin-top: 18px;
+            margin-top: 12px;
             overflow-x: auto;
           }
           .gap-table {
@@ -266,15 +418,16 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
             border-collapse: collapse;
             border: 1px solid #d8c8a8;
             background: rgba(255,255,255,0.72);
-            border-radius: 8px;
+            border-radius: 7px;
             overflow: hidden;
           }
           .gap-table th,
           .gap-table td {
-            padding: 12px 14px;
+            padding: 8px 10px;
             border-bottom: 1px solid #e6d8bd;
             text-align: left;
             vertical-align: top;
+            font-size: 0.76rem;
           }
           .gap-table th {
             background: #efe3c9;
@@ -286,22 +439,70 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
           .gap-table tr:last-child td {
             border-bottom: none;
           }
-          .finding header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+          .finding header {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px 14px;
+            align-items: start;
+          }
+          .finding-title {
+            min-width: 0;
+          }
+          .finding-title strong {
+            display: block;
+          }
+          .finding-header-meta {
+            display: inline-flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 8px;
+            white-space: nowrap;
+          }
+          .finding-recall {
+            white-space: nowrap;
+          }
           .requirement-label {
             margin-bottom: 6px;
             color: #8a3b12;
-            font-size: 0.78rem;
+            font-size: 0.7rem;
             text-transform: uppercase;
             letter-spacing: 0.04em;
           }
           .finding-metrics {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 8px 16px;
-            margin-bottom: 12px;
+            gap: 6px 12px;
+            margin-bottom: 8px;
             color: #6f6252;
+            font-size: 0.74rem;
           }
-          .status { border-radius: 4px; padding: 3px 8px; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.05em; }
+          .evidence-stage {
+            display: inline-block;
+            margin-left: 6px;
+            padding: 1px 6px;
+            border-radius: 999px;
+            background: #efe3c9;
+            color: #8a3b12;
+            font-size: 0.68rem;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+          }
+          .comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 16px;
+            margin-top: 20px;
+          }
+          .comparison-card {
+            padding: 10px;
+            border: 1px solid #d8c8a8;
+            border-radius: 7px;
+            background: rgba(255,255,255,0.72);
+          }
+          .comparison-card h2 {
+            margin-bottom: 8px;
+          }
+          .status { border-radius: 4px; padding: 2px 7px; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
           .status-satisfied { background: #d7f1df; color: #2d6a4f; }
           .status-partial { background: #fff1cf; color: #b7791f; }
           .status-not_satisfied { background: #ffdedd; color: #9b2226; }
@@ -311,53 +512,69 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
               flex-direction: column;
               align-items: flex-start;
             }
+            .finding header {
+              grid-template-columns: 1fr;
+            }
+            .finding-header-meta {
+              justify-content: flex-start;
+            }
             .finding-metrics { grid-template-columns: 1fr; }
+            .comparison-grid { grid-template-columns: 1fr; }
           }
         </style>
       </head>
       <body>
-        <div class="head">
-          <div class="head-main">
-            <h1>Compliance result</h1>
-            <p class="code path-line">${escapeHtml(compliance.saved_at)}</p>
-            ${caseTitle ? `<p class="case-line">Case: ${escapeHtml(caseTitle)}</p>` : ""}
-            <p>${escapeHtml(`${formatMethodLabel(compliance.method)} · ${compliance.compliance_provider} · ${compliance.compliance_model}`)}</p>
-            <p>Created: ${escapeHtml(formatDateTime(compliance.created_at))}</p>
+        <div class="page">
+          <div class="head">
+            <div class="head-main">
+              <h1>Compliance result</h1>
+              <p class="code path-line">${escapeHtml(compliance.saved_at)}</p>
+              ${caseTitle ? `<p class="case-line">Case: ${escapeHtml(caseTitle)}</p>` : ""}
+              <p>${escapeHtml(`${formatMethodLabel(compliance.method)} · ${compliance.compliance_provider} · ${compliance.compliance_model}`)}</p>
+              <p>Created: ${escapeHtml(formatDateTime(compliance.created_at))}</p>
+            </div>
           </div>
+          <section class="section-block">
+            <h2>${escapeHtml(compliance.method === "two_stage_rag" ? "Stage Progression" : "Final Assessment")}</h2>
+            <div class="comparison-grid">
+              ${compliance.method === "two_stage_rag"
+                ? stageCards
+                : `
+              <div class="comparison-card">
+                <h2>${escapeHtml(formatMethodLabel(compliance.method))}</h2>
+                ${renderAssessmentBar({
+                  completionPercent: compliance.analysis.completion_percent ?? compliancePercent,
+                  overallAssessment: compliance.analysis.overall_assessment,
+                  scores: compliance.scores,
+                  retrievalMetrics: compliance.retrieval_metrics,
+                  statusSummary,
+                })}
+              </div>`}
+            </div>
+          </section>
+          <div class="gap-table-wrap">
+            <table class="gap-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Requirement</th>
+                  <th>Confidence</th>
+                  <th>Status</th>
+                  <th>Gap</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>${renderLinkedRows(
+                compliance.analysis.linked_rows ?? [],
+                procedureToRecord,
+              )}</tbody>
+            </table>
+          </div>
+          <section class="section-block">
+            <h2>Grounded Evidence (Procedure → Record)</h2>
+            <div class="findings">${requirementEvaluations}</div>
+          </section>
         </div>
-        <div class="assessment">
-          <span class="assessment-item assessment-item-edge-left">Completed <strong>${compliance.analysis.completion_percent ?? compliancePercent}%</strong></span>
-          <span class="assessment-item">Evidence Support <strong>${compliance.scores.m3_evidence_weighted_score.toFixed(4)}</strong></span>
-          <span class="assessment-item">Grounding Quality <strong>${compliance.scores.m5_grounding_score.toFixed(4)}</strong></span>
-          ${compliance.retrieval_metrics?.record_k
-            ? `<span class="assessment-item">Recall@<strong>${compliance.retrieval_metrics.record_k}</strong></span>`
-            : ""}
-          <span class="assessment-item assessment-item-edge-left">Label: <strong>${escapeHtml(compliance.analysis.overall_assessment)}</strong></span>
-        </div>
-        <div class="gap-table-wrap">
-          <table class="gap-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Requirement</th>
-                <th>Confidence</th>
-                <th>${compliance.retrieval_metrics?.record_k ? `Recall@${compliance.retrieval_metrics.record_k}` : "Recall@k"}</th>
-                <th>Status</th>
-                <th>Gap</th>
-                <th>Recommendation</th>
-              </tr>
-            </thead>
-            <tbody>${renderLinkedRows(
-              compliance.analysis.linked_rows ?? [],
-              procedureToRecord,
-              compliance.retrieval_metrics?.record_k,
-            )}</tbody>
-          </table>
-        </div>
-        <section class="section-block">
-          <h2>Grounded Evidence (Procedure → Record)</h2>
-          <div class="findings">${requirementEvaluations}</div>
-        </section>
       </body>
     </html>
   `);
@@ -423,7 +640,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (complianceMethod !== "multi_source_rag" && selectedAdditionalComplianceDocuments.length > 0) {
+    if (complianceMethod !== "two_stage_rag" && selectedAdditionalComplianceDocuments.length > 0) {
       setSelectedAdditionalComplianceDocuments([]);
     }
   }, [complianceMethod, selectedAdditionalComplianceDocuments.length]);
@@ -668,12 +885,13 @@ export default function App() {
               body {
                 margin: 0;
                 font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+                font-size: 12px;
                 background: #1c1b1a;
                 color: #f5f0e8;
               }
               pre {
                 margin: 0;
-                padding: 16px;
+                padding: 12px;
                 white-space: pre-wrap;
                 overflow-wrap: anywhere;
               }
@@ -693,8 +911,9 @@ export default function App() {
 
   async function onDeleteDocument(storedFilename: string) {
     const document = documents.find((item) => item.stored_filename === storedFilename);
-    if (document?.document_type === "procedure" && document.frozen) {
-      setError(`Procedure "${document.source_filename}" is frozen. Unfreeze it before deleting.`);
+    if ((document?.document_type === "procedure" || document?.document_type === "reference") && document.frozen) {
+      const documentLabel = document.document_type === "procedure" ? "Procedure" : "Reference";
+      setError(`${documentLabel} "${document.source_filename}" is frozen. Unfreeze it before deleting.`);
       return;
     }
     if (!window.confirm(`Delete document "${document?.source_filename ?? storedFilename}"?`)) {
@@ -755,9 +974,9 @@ export default function App() {
     }
   }
 
-  async function onToggleProcedureFreeze(storedFilename: string, frozen: boolean) {
+  async function onToggleDocumentFreeze(storedFilename: string, frozen: boolean) {
     const document = documents.find((item) => item.stored_filename === storedFilename);
-    if (!document || document.document_type !== "procedure") {
+    if (!document || (document.document_type !== "procedure" && document.document_type !== "reference")) {
       return;
     }
 
@@ -773,6 +992,9 @@ export default function App() {
           ? {
               ...current,
               procedure_documents: current.procedure_documents.map((item) =>
+                item.stored_filename === storedFilename ? updated : item,
+              ),
+              reference_documents: current.reference_documents.map((item) =>
                 item.stored_filename === storedFilename ? updated : item,
               ),
             }
@@ -909,6 +1131,28 @@ export default function App() {
     }
   }
 
+  async function onUpdateCaseRecords(caseId: string, recordStoredFilenames: string[]) {
+    setBusy(`update-case-records:${caseId}`);
+    setError("");
+    try {
+      const updated = await updateCaseRecords({
+        caseId,
+        recordStoredFilenames,
+      });
+      setCases((current) =>
+        current.map((item) => (item.case_id === caseId ? updated : item)),
+      );
+      if (caseDocuments?.case_id === caseId) {
+        const payload = await getCaseDocuments(caseId);
+        setCaseDocuments(payload);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Case update failed");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function onDeleteCompliance(caseId: string, fileName: string) {
     if (!window.confirm(`Delete compliance result "${fileName}"?`)) {
       return;
@@ -1018,7 +1262,7 @@ export default function App() {
             onParseDocument={(storedFilename) => void onParseDocument(storedFilename)}
             onViewOriginal={onViewOriginal}
             onCheckRequirements={(storedFilename) => void onCheckRequirements(storedFilename)}
-            onToggleProcedureFreeze={(storedFilename, frozen) => void onToggleProcedureFreeze(storedFilename, frozen)}
+            onToggleDocumentFreeze={(storedFilename, frozen) => void onToggleDocumentFreeze(storedFilename, frozen)}
             onDeleteDocument={(storedFilename) => void onDeleteDocument(storedFilename)}
           />
         );
@@ -1044,11 +1288,15 @@ export default function App() {
         return (
           <CasesPanel
             cases={cases}
+            documents={documents}
             selectedCaseId={selectedCaseId}
             caseDocuments={caseDocuments}
             extractionInfoByDocument={extractionInfoByDocument}
             busy={busy}
             onShowDocuments={(caseId) => void onShowCaseDocuments(caseId)}
+            onUpdateCaseRecords={(caseId, recordStoredFilenames) =>
+              void onUpdateCaseRecords(caseId, recordStoredFilenames)
+            }
             onDeleteCase={(caseId) => void onDeleteCase(caseId)}
           />
         );

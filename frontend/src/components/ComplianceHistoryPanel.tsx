@@ -4,6 +4,10 @@ import type { CaseDocuments, CaseRecord, ComplianceSummary, DocumentRecord } fro
 import { formatDateTime } from "../utils/formatDateTime";
 import { formatMethodLabel } from "../utils/formatMethodLabel";
 
+function formatScore(value: number) {
+  return value.toFixed(4);
+}
+
 function normalizeSearchValue(value: string) {
   return value
     .normalize("NFKD")
@@ -97,10 +101,10 @@ export function ComplianceHistoryPanel({
 
   return (
     <section className="panel compliance-history-panel">
-      <div className="panel-head">
+      <div className="panel-head compliance-history-head">
         <h2>Compliances</h2>
         <button
-          className="button button-small button-danger"
+          className="button button-small button-danger compliance-history-delete-all"
           onClick={onDeleteAllCompliances}
           disabled={complianceHistory.length === 0 || busy === "delete-all-compliances"}
           type="button"
@@ -129,17 +133,29 @@ export function ComplianceHistoryPanel({
                 return (
                   <>
                     <div className="history-main">
-                      <span className="history-case">{caseTitleById.get(item.case_id) ?? item.case_id}</span>
                       <div className="history-title-row">
-                        <strong className="document-option-title">{item.provider} · {item.model}</strong>
-                        <span className="document-option-meta">Completed {item.completion_percent}%</span>
+                        <span className="history-case">{caseTitleById.get(item.case_id) ?? item.case_id}</span>
+                        <span className="document-option-meta">Completed <strong>{item.completion_percent}%</strong></span>
+                        <span className="document-option-meta">· Evidence Support <strong>{formatScore(item.m3_evidence_weighted_score)}</strong></span>
+                        <span className="document-option-meta">· Grounding Quality <strong>{formatScore(item.m5_grounding_score)}</strong></span>
+                        <span className="history-status-group">
+                          <span className="history-status-chip history-status-chip-satisfied">SATISFIED</span>
+                          <strong className="history-status-count">{item.satisfied_count}</strong>
+                        </span>
+                        <span className="history-status-group">
+                          <span className="history-status-chip history-status-chip-partial">PARTIAL</span>
+                          <strong className="history-status-count">{item.partial_count}</strong>
+                        </span>
+                        <span className="history-status-group">
+                          <span className="history-status-chip history-status-chip-not-satisfied">NOT_SATISFIED</span>
+                          <strong className="history-status-count">{item.not_satisfied_count}</strong>
+                        </span>
                       </div>
                       <div className="history-meta-row document-option-meta">
-                        <span>Method: {formatMethodLabel(item.method)}</span>
-                        <span aria-hidden="true">·</span>
-                        <span>Created: {formatDateTime(item.created_at)}</span>
+                        <span>
+                          {item.provider} · <strong>{item.model}</strong> · Method: <strong>{formatMethodLabel(item.method)}</strong> · Created: {formatDateTime(item.created_at)} · <code>{item.file_name}</code>
+                        </span>
                       </div>
-                      <code>{item.file_name}</code>
                     </div>
                     <div className="actions history-actions">
                       <button

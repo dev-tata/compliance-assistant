@@ -106,12 +106,15 @@ def find_document_or_404(registry: list[dict], stored_filename: str) -> tuple[in
     raise HTTPException(status_code=404, detail="Document not found")
 
 
-def ensure_procedure_not_frozen(document: DocumentRecord, *, action: str) -> None:
-    if document.document_type == DocumentType.procedure and document.frozen:
-        raise HTTPException(
-            status_code=409,
-            detail=f'Procedure "{document.source_filename}" is frozen and cannot be used for {action}.',
-        )
+def ensure_document_not_frozen(document: DocumentRecord, *, action: str) -> None:
+    if document.document_type not in (DocumentType.procedure, DocumentType.reference) or not document.frozen:
+        return
+
+    document_label = "Procedure" if document.document_type == DocumentType.procedure else "Reference"
+    raise HTTPException(
+        status_code=409,
+        detail=f'{document_label} "{document.source_filename}" is frozen and cannot be used for {action}.',
+    )
 
 
 def get_or_parse_document(

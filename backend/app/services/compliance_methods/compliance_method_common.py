@@ -25,7 +25,7 @@ from app.services.llm.json_utils import extract_json_object
 from app.services.retrieval.faiss_retrieval import normalize_whitespace
 from app.services.storage_paths import get_case_compliance_dir
 
-PROMPT_FAMILY = "canonical_compliance_v1"
+PROMPT_FAMILY = "canonical_compliance_v2_relaxed"
 STATUS_COMPLETION_SCORES = {
     "satisfied": 100,
     "partial": 50,
@@ -38,7 +38,7 @@ def execute_compliance_method(
     case_id: str,
     case_payload: dict[str, object],
     request: ComplianceRequest,
-    method: ComplianceMethod,
+    method: ComplianceMethod | str,
     prompt: str,
 ) -> ComplianceResponse:
     llm_service = get_llm_service(request.provider, request.model)
@@ -83,13 +83,21 @@ def execute_compliance_method(
     return response
 
 
-def build_shared_output_instructions(*, single_requirement: bool = False) -> list[str]:
+def build_shared_output_instructions(
+    *,
+    single_requirement: bool = False,
+    include_feedback: bool = True,
+) -> list[str]:
     output_structure = [
         "{",
         '"overall_assessment":"computed_by_backend",',
-        '"linked_rows":[{"requirement_ref":"REQ-1","status":"satisfied|partial|not_satisfied","gap":"...","recommendation":"..."}],',
+        (
+            '"linked_rows":[{"requirement_ref":"REQ-1","status":"satisfied|partial|not_satisfied","gap":"...","recommendation":"..."}],'
+            if include_feedback
+            else '"linked_rows":[{"requirement_ref":"REQ-1","status":"satisfied|partial|not_satisfied","gap":"","recommendation":""}],'
+        ),
         '"procedure_to_record":[{"requirement":"...","status":"satisfied|partial|not_satisfied","evidence":["verbatim or near-verbatim short quotes"],"source_documents":["record-file-name"]}],',
-        '"recommended_actions":["..."]',
+        ('"recommended_actions":["..."]' if include_feedback else '"recommended_actions":[]'),
         "}",
     ]
     return [
@@ -99,19 +107,28 @@ def build_shared_output_instructions(*, single_requirement: bool = False) -> lis
         "- Evaluate each requirement independently.",
         "- Use only admissible evidence from the input payload for this method.",
         "- Treat extracted deliverables as the canonical requirement source.",
+        "- Evaluate only requirement-to-record content match. Do not assume any preferred record template, section set, field set, workflow, or document style unless the requirement itself states it.",
         "- Provide evidence as short quote-based plain text grounded in admissible record evidence.",
         "- Do not invent requirements, evidence, sections, systems, roles, or context.",
         "Status definitions:",
-        "- satisfied: all required elements are explicitly supported by admissible record evidence.",
-        "- partial: some required elements are supported, but at least one required element is missing.",
-        "- not_satisfied: required support is absent, ambiguous, contradictory, indirect, or not admissible.",
+        "- satisfied: all required elements are supported by admissible record evidence, either explicitly or through clear equivalent structured evidence.",
+        "- partial: the record substantially addresses the requirement, but at least one material element is missing, unclear, weakly supported, or only indirectly shown.",
+        "- not_satisfied: required support is absent, clearly contradictory, too weak to rely on, or not admissible for this method.",
         "Predicate-level decision logic:",
         "- Break each requirement into the concrete elements it requires.",
         "- Check each element against admissible evidence only.",
         "- If all elements are supported, return satisfied.",
         "- If some elements are supported but one or more are missing, return partial.",
-        "- If support is ambiguous, conflicting, too weak, or missing entirely, return not_satisfied.",
+        "- Prefer substance over exact wording. Equivalent wording, structured tables, summaries, and conclusions may satisfy a requirement if they clearly establish the required point.",
+        "- Do not require a specific record layout, heading name, table shape, or wording pattern unless the requirement explicitly requires it.",
+        "- Do not penalize a record merely because evidence appears in a different section, format, or phrasing than the procedure text.",
+        "- If support is ambiguous, incomplete, or indirect but still meaningful, prefer partial over not_satisfied.",
+        "- Use not_satisfied only when the requirement is truly unsupported, contradicted, or too weak to rely on.",
         "- If support is indirect but still admissible and sufficient to establish the required element, you may treat it as satisfied or partial depending on completeness.",
+        "- Reference context may clarify requirement meaning, but it does not create additional required fields or record structure beyond the requirement itself.",
+        "- For conditional requirements such as 'where necessary' or 'in cases where', first assess whether the triggering condition is evidenced in the admissible record.",
+        "- If the trigger is not evidenced, do not assume the condition occurred. Prefer satisfied when the record supports non-applicability, otherwise prefer partial rather than not_satisfied.",
+        "- For near-complete records, small wording gaps should usually result in partial rather than not_satisfied when the intended control, decision, or output is otherwise demonstrated.",
         "Output requirements:",
         "- Return one JSON object only.",
         "- Do not return markdown or code fences.",
@@ -133,15 +150,23 @@ def build_shared_output_instructions(*, single_requirement: bool = False) -> lis
         ),
         "- Every procedure_to_record item and linked_rows item must use one of these status values only: satisfied, partial, not_satisfied.",
         "- Every procedure_to_record.source_documents item must refer only to record document filenames from this case.",
-        "- For satisfied items, linked_rows.gap and linked_rows.recommendation may be empty.",
-        "- For partial and not_satisfied items, gap must briefly state the missing point and recommendation must briefly state the corrective action.",
+        (
+            "- For satisfied items, linked_rows.gap and linked_rows.recommendation may be empty."
+            if include_feedback
+            else "- Set linked_rows.gap and linked_rows.recommendation to empty strings for every requirement."
+        ),
+        (
+            "- For partial and not_satisfied items, gap must briefly state the missing point and recommendation must briefly state the corrective action."
+            if include_feedback
+            else "- Do not generate gaps or recommendations in this stage. Keep recommended_actions empty."
+        ),
         "- Do not include findings in the model output. The backend will derive findings from procedure_to_record.",
         "Return JSON with exactly this structure:",
         *output_structure,
     ]
 
 
-def build_method_specific_constraints(method: ComplianceMethod) -> list[str]:
+def build_method_specific_constraints(method: ComplianceMethod | str) -> list[str]:
     shared = [f"Method metadata: {method}."]
     if method == "non_rag":
         return [
@@ -150,7 +175,7 @@ def build_method_specific_constraints(method: ComplianceMethod) -> list[str]:
             "- You may search anywhere inside records.",
             "- Do not use retrieval results because none are provided for this method.",
         ]
-    if method == "single_source_rag":
+    if method == "record_retrieval_stage":
         return [
             *shared,
             "- Use ONLY retrieved_record_sections as admissible evidence.",
@@ -162,6 +187,7 @@ def build_method_specific_constraints(method: ComplianceMethod) -> list[str]:
         "- Use ONLY retrieved_record_sections as admissible compliance evidence.",
         "- Use retrieved_requirement_context only to interpret the meaning of a requirement.",
         "- Never use retrieved_requirement_context as compliance evidence and never cite reference documents in source_documents.",
+        "- Treat the single-source baseline as the minimum acceptable result. You may keep it or improve it, but do not downgrade it unless the backend explicitly allows that behavior.",
         "- Do not rely on any full record document outside retrieved_record_sections.",
         "- If a claim is supported only outside retrieved_record_sections, treat it as not admissible and return partial or not_satisfied accordingly.",
     ]
@@ -169,13 +195,17 @@ def build_method_specific_constraints(method: ComplianceMethod) -> list[str]:
 
 def build_compliance_prompt(
     *,
-    method: ComplianceMethod,
+    method: ComplianceMethod | str,
     payload: dict[str, Any],
     instructions: str | None,
     single_requirement: bool = False,
+    include_feedback: bool = True,
 ) -> str:
     prompt_parts = [
-        *build_shared_output_instructions(single_requirement=single_requirement),
+        *build_shared_output_instructions(
+            single_requirement=single_requirement,
+            include_feedback=include_feedback,
+        ),
         "Input payload notes:",
         "- The payload contains the requirement list plus method-specific context blocks.",
         *build_method_specific_constraints(method),
@@ -274,15 +304,17 @@ def serialize_deliverable_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
 
 def build_single_requirement_prompt(
     *,
-    method: ComplianceMethod,
+    method: ComplianceMethod | str,
     requirement_payload: dict[str, Any],
     instructions: str | None,
+    include_feedback: bool = True,
 ) -> str:
     return build_compliance_prompt(
         method=method,
         payload=requirement_payload,
         instructions=instructions,
         single_requirement=True,
+        include_feedback=include_feedback,
     )
 
 
@@ -343,15 +375,17 @@ def normalize_compliance_analysis(
 def evaluate_single_requirement(
     *,
     llm_service: Any,
-    method: ComplianceMethod,
+    method: ComplianceMethod | str,
     requirement_payload: dict[str, Any],
     instructions: str | None,
     temperature: float = 0.0,
+    include_feedback: bool = True,
 ) -> ComplianceAnalysis:
     prompt = build_single_requirement_prompt(
         method=method,
         requirement_payload=requirement_payload,
         instructions=instructions,
+        include_feedback=include_feedback,
     )
     return parse_compliance_analysis_response(
         raw_analysis=llm_service.generate(prompt, temperature=temperature),

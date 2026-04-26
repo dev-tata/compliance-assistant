@@ -404,6 +404,8 @@ def _load_compliance_summary(path: Path, *, fallback_case_id: str) -> Compliance
         return None
 
     analysis_payload = _normalize_compliance_analysis_payload(payload.get("analysis", {}))
+    status_counts = _compute_compliance_status_counts(analysis_payload)
+    scores_payload = payload.get("scores", {}) if isinstance(payload.get("scores", {}), dict) else {}
 
     return ComplianceSummary(
         case_id=payload.get("case_id", fallback_case_id),
@@ -415,6 +417,11 @@ def _load_compliance_summary(path: Path, *, fallback_case_id: str) -> Compliance
         method=payload.get("method", "non_rag"),
         overall_assessment=analysis_payload.get("overall_assessment", "unknown"),
         completion_percent=analysis_payload.get("completion_percent", 0),
+        satisfied_count=status_counts["satisfied"],
+        partial_count=status_counts["partial"],
+        not_satisfied_count=status_counts["not_satisfied"],
+        m3_evidence_weighted_score=scores_payload.get("m3_evidence_weighted_score", 0.0),
+        m5_grounding_score=scores_payload.get("m5_grounding_score", 0.0),
         reference_stored_filenames=payload.get("reference_stored_filenames", []),
     )
 
@@ -437,6 +444,19 @@ def _normalize_compliance_analysis_payload(payload: Any) -> dict[str, Any]:
     normalized["completion_percent"] = compute_completion_percent(findings)
     normalized["overall_assessment"] = compute_overall_assessment_from_findings(findings)
     return normalized
+
+
+def _compute_compliance_status_counts(payload: dict[str, Any]) -> dict[str, int]:
+    findings_payload = payload.get("procedure_to_record") or payload.get("findings") or []
+    findings = [
+        ComplianceFinding(**item)
+        for item in findings_payload
+        if isinstance(item, dict)
+    ]
+    counts = {"satisfied": 0, "partial": 0, "not_satisfied": 0}
+    for finding in findings:
+        counts[finding.status] += 1
+    return counts
 
 
 def _parse_documents(

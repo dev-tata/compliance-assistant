@@ -1,5 +1,6 @@
 import type { FormEvent } from "react";
 
+import { FrozenBadge } from "./FrozenBadge";
 import type { CaseRecord, ComplianceMethod, DocumentRecord, LLMProviderDescriptor } from "../types";
 import { documentTypeLabels, languageLabels } from "../constants";
 import { formatMethodLabel } from "../utils/formatMethodLabel";
@@ -81,13 +82,11 @@ export function CompliancePanel({
   const hasReferencesForNested = selectedReferenceIds.length > 0 || selectedAdditionalDocuments.length > 0;
   const methodHint = method === "non_rag"
     ? "Uses extracted procedure deliverables plus full record JSON."
-    : method === "single_source_rag"
-      ? "Uses extracted procedure deliverables plus retrieved record index chunks."
-      : "Uses extracted procedure deliverables plus retrieved record and reference index chunks.";
+    : "Uses extracted procedure deliverables, then a record-retrieval stage followed by a reference-informed upgrade stage.";
   const readinessMessage = missingProcedureExtraction.length > 0
     ? "Run deliverable extraction for all procedure documents before compliance."
-    : method === "multi_source_rag" && !hasReferencesForNested
-      ? "Multi-source RAG needs at least one reference document in the case or selected below."
+    : method === "two_stage_rag" && !hasReferencesForNested
+      ? "Two-Stage RAG needs at least one reference document in the case or selected below."
       : "";
   const isSubmitDisabled = !selectedCaseId || busy === "compliance" || Boolean(readinessMessage);
   const complianceModelOptions = getModelOptions(provider, model);
@@ -125,52 +124,50 @@ export function CompliancePanel({
           <span>Method</span>
           <select value={method} onChange={(e) => onMethodChange(e.target.value as ComplianceMethod)}>
             <option value="non_rag">{formatMethodLabel("non_rag")}</option>
-            <option value="single_source_rag">{formatMethodLabel("single_source_rag")}</option>
-            <option value="multi_source_rag">{formatMethodLabel("multi_source_rag")}</option>
+            <option value="two_stage_rag">{formatMethodLabel("two_stage_rag")}</option>
           </select>
         </label>
         <p className="empty-state">{methodHint}</p>
-        {method === "multi_source_rag" ? (
-          <div className="field">
-            <span>Additional reference documents</span>
-            <div className="stack">
-              <div>
-                {sortedDocuments.map((doc) => (
-                  <div key={doc.stored_filename}>
-                    <label className="check">
-                      <input
-                        type="checkbox"
-                        checked={selectedAdditionalDocuments.includes(doc.stored_filename)}
-                        onChange={(e) =>
-                          onSelectedAdditionalDocumentsChange(
-                            e.target.checked
-                              ? [...selectedAdditionalDocuments, doc.stored_filename]
-                              : selectedAdditionalDocuments.filter((item) => item !== doc.stored_filename),
-                          )
-                        }
-                      />
-                      <span className="document-option-copy">
-                        <strong className="document-option-title">{doc.source_filename}</strong>
-                        <span className="document-option-meta">
-                          {formatDocumentType(doc.document_type)} · {doc.group_id ?? "no-group"} · {formatLanguage(doc.language)}
-                          {" · "}Created: {formatDateTime(doc.created_at)}
-                          {extractionInfoByDocument[doc.stored_filename]
-                            ? ` · Extraction: ${extractionInfoByDocument[doc.stored_filename]?.provider} · ${extractionInfoByDocument[doc.stored_filename]?.model}`
-                            : ""}
-                        </span>
-                      </span>
-                    </label>
-                  </div>
-                ))}
-                {sortedDocuments.length === 0 ? <p className="empty-state">No extra documents available.</p> : null}
+        {method === "two_stage_rag" ? (
+          <div>
+            <h3>Reference files</h3>
+            {sortedDocuments.map((doc) => (
+              <div key={doc.stored_filename}>
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={selectedAdditionalDocuments.includes(doc.stored_filename)}
+                    onChange={(e) =>
+                      onSelectedAdditionalDocumentsChange(
+                        e.target.checked
+                          ? [...selectedAdditionalDocuments, doc.stored_filename]
+                          : selectedAdditionalDocuments.filter((item) => item !== doc.stored_filename),
+                      )
+                    }
+                  />
+                  <span className="document-option-copy">
+                    <span className="document-option-heading">
+                      <strong className="document-option-title">{doc.source_filename}</strong>
+                      <FrozenBadge document={doc} />
+                    </span>
+                    <span className="document-option-meta">
+                      {formatDocumentType(doc.document_type)} · {doc.group_id ?? "no-group"} · {formatLanguage(doc.language)}
+                      {" · "}Created: {formatDateTime(doc.created_at)}
+                      {extractionInfoByDocument[doc.stored_filename]
+                        ? ` · Extraction: ${extractionInfoByDocument[doc.stored_filename]?.provider} · ${extractionInfoByDocument[doc.stored_filename]?.model}`
+                        : ""}
+                    </span>
+                  </span>
+                </label>
               </div>
-            </div>
+            ))}
+            {sortedDocuments.length === 0 ? <p className="empty-state">No extra documents available.</p> : null}
           </div>
         ) : null}
         {readinessMessage ? <p className="empty-state">{readinessMessage}</p> : null}
         <label className="field">
           <span>Instructions</span>
-          <textarea value={instructions} onChange={(e) => onInstructionsChange(e.target.value)} rows={5} />
+          <textarea className="textarea-row" value={instructions} onChange={(e) => onInstructionsChange(e.target.value)} rows={1} />
         </label>
         <button className="button" disabled={isSubmitDisabled}>
           {busy === "compliance" ? "Running..." : "Run compliance"}

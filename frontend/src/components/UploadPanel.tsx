@@ -75,7 +75,7 @@ export function UploadPanel({
         </label>
         {extractionEnabled ? (
           <>
-            <div className="field field-inline">
+            <div className="field field-inline upload-extraction-field">
               <span>Extraction</span>
               <div className="check">
                 <input
@@ -124,7 +124,7 @@ export function UploadPanel({
           <span>Group ID</span>
           <input value={groupId} onChange={(e) => onGroupIdChange(e.target.value)} placeholder="Optional" />
         </label>
-        <button className="button" disabled={!uploadFile || busy === "upload"}>
+        <button className="button upload-submit-button" disabled={!uploadFile || busy === "upload"}>
           {busy === "upload" ? "Uploading..." : extractOnUpload && extractionEnabled ? "Upload and extract" : "Upload document"}
         </button>
       </form>

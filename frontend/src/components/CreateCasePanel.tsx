@@ -1,5 +1,6 @@
 import type { FormEvent } from "react";
 
+import { FrozenBadge } from "./FrozenBadge";
 import type { DocumentRecord } from "../types";
 import { documentTypeLabels, languageLabels } from "../constants";
 import { formatDateTime } from "../utils/formatDateTime";
@@ -17,11 +18,6 @@ function formatLanguage(value: DocumentRecord["language"]) {
 function formatDocumentType(value: DocumentRecord["document_type"]) {
   if (!value) return "Untyped";
   return documentTypeLabels[value] ?? value;
-}
-
-function formatFrozenState(doc: DocumentRecord) {
-  if (!doc.frozen) return null;
-  return doc.document_type === "procedure" ? "Frozen" : "Locked";
 }
 
 type CreateCasePanelProps = {
@@ -74,7 +70,7 @@ export function CreateCasePanel({
           <span className="document-option-copy">
             <span className="document-option-heading">
               <strong className="document-option-title">{doc.source_filename}</strong>
-              {formatFrozenState(doc) ? <span className="status-badge status-badge-frozen">{formatFrozenState(doc)}</span> : null}
+              <FrozenBadge document={doc} />
             </span>
             <span className="document-option-meta">
               {formatDocumentType(doc.document_type)} · {doc.group_id ?? "no-group"} · {formatLanguage(doc.language)}
@@ -98,7 +94,7 @@ export function CreateCasePanel({
         </label>
         <label className="field">
           <span>Notes</span>
-          <textarea value={notes} onChange={(e) => onNotesChange(e.target.value)} rows={4} />
+          <textarea className="textarea-row" value={notes} onChange={(e) => onNotesChange(e.target.value)} rows={1} />
         </label>
         <div className="split-select create-case-columns">
           <div>

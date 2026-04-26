@@ -18,7 +18,7 @@ from app.services.storage_paths import (
     get_procedure_document_extraction_latest_path,
 )
 
-PROMPT_VERSION = "deliverable_extraction_v3_single_call"
+PROMPT_VERSION = "deliverable_extraction_v4_record_auditable"
 
 OBLIGATION_TERMS = ("shall", "must", "required", "needs to")
 EXCLUDED_HEADINGS = {
@@ -42,6 +42,7 @@ def build_document_extraction_instructions() -> list[str]:
         "Hard rules:",
         "- Use only the provided sections and tables.",
         "- Extract only obligations explicitly stated in this document.",
+        "- Prefer obligations that are reasonably auditable against a real record document.",
         "- Ignore responsibilities, aims, conclusions, and background statements unless they contain an explicit obligation.",
         "- Ignore referenced SOP contents unless this document explicitly requires that content here.",
         "- Return one item per atomic obligation.",
@@ -50,6 +51,9 @@ def build_document_extraction_instructions() -> list[str]:
         "- The source_quote must support the requirement_text directly.",
         "- Do not summarize a whole document or whole section into one broad item.",
         "- Do not include optional guidance unless the wording is mandatory.",
+        "- Do not extract generic process principles as standalone deliverables unless the procedure clearly expects a documented decision, rationale, classification, approval, or output in the record.",
+        "- For conditional clauses such as 'where necessary' or 'in cases where', extract them only when the document clearly expects the record to document that condition, decision, or resulting rationale.",
+        "- If two adjacent statements together describe one auditable record expectation, prefer one deliverable over splitting them into multiple near-duplicate obligations.",
         "- Every item must include the matching section_ref from the input.",
         "- Do not repeat source_document, section_label, or heading_title in the output.",
         "- If an obligation is expressed as part of a longer sentence, rewrite requirement_text into a complete clear sentence while preserving the original meaning exactly.",

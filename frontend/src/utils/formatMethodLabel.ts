@@ -6,12 +6,11 @@ export function formatMethodLabel(method: MethodValue): string {
   switch (method) {
     case "non_rag":
       return "Non-RAG";
-    case "single_source_rag":
-    case "simple_rag":
-      return "Single-source RAG";
-    case "multi_source_rag":
-    case "nested_rag":
-      return "Multi-source RAG";
+    case "single_call_two_stage_rag":
+    case "two_stage_rag":
+      return "Two-Stage RAG";
+    case "record_retrieval_stage":
+      return "Record Retrieval Stage";
     default:
       return String(method ?? "");
   }
