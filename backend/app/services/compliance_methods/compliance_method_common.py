@@ -483,15 +483,25 @@ def compute_completion_percent(findings: list[ComplianceFinding]) -> int:
 
 def compute_overall_assessment_from_findings(findings: list[ComplianceFinding]) -> str:
     completion_percent = compute_completion_percent(findings)
+    if completion_percent <= 10:
+        return "Completed_0_10"
     if completion_percent <= 20:
-        return "Completed_0_20"
+        return "Completed_11_20"
+    if completion_percent <= 30:
+        return "Completed_21_30"
     if completion_percent <= 40:
-        return "Completed_21_40"
+        return "Completed_31_40"
+    if completion_percent <= 50:
+        return "Completed_41_50"
     if completion_percent <= 60:
-        return "Completed_41_60"
+        return "Completed_51_60"
+    if completion_percent <= 70:
+        return "Completed_61_70"
     if completion_percent <= 80:
-        return "Completed_61_80"
-    return "Completed_81_100"
+        return "Completed_71_80"
+    if completion_percent <= 90:
+        return "Completed_81_90"
+    return "Completed_91_100"
 
 
 def apply_computed_overall_assessment(analysis: ComplianceAnalysis) -> ComplianceAnalysis:

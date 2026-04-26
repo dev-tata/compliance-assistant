@@ -437,7 +437,7 @@ def _timestamp_from_path(path: Path) -> str:
 
 def _normalize_compliance_analysis_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
-        return {"overall_assessment": "Completed_0_20", "completion_percent": 0}
+        return {"overall_assessment": "Completed_0_10", "completion_percent": 0}
 
     normalized = dict(payload)
     findings_payload = normalized.get("procedure_to_record") or normalized.get("findings") or []

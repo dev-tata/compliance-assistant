@@ -30,6 +30,7 @@ import { DocumentsPanel } from "./components/DocumentsPanel";
 import { FrozenBadge } from "./components/FrozenBadge";
 import { UploadPanel } from "./components/UploadPanel";
 import { formatMethodLabel } from "./utils/formatMethodLabel";
+import { formatOverallAssessment } from "./utils/formatOverallAssessment";
 import type {
   CaseRecord,
   CaseDocuments,
@@ -217,7 +218,7 @@ function renderAssessmentBar({
         && typeof retrievalMetrics?.record_recall_at_k === "number")
         ? `<span class="assessment-item">Recall@${retrievalMetrics.record_k} <strong>${formatRecallMetric(retrievalMetrics.record_recall_at_k)}</strong></span>`
         : ""}
-      <span class="assessment-item assessment-item-edge-left">Label: <strong>${escapeHtml(overallAssessment)}</strong></span>
+      <span class="assessment-item assessment-item-edge-left">Label: <strong>${escapeHtml(formatOverallAssessment(overallAssessment))}</strong></span>
     </div>
   `;
 }
