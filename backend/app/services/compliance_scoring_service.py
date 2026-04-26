@@ -89,7 +89,11 @@ def _compute_weight(requirement: str) -> float:
     return 1.0
 
 
-def compute_scores(analysis: ComplianceAnalysis) -> ComplianceScores:
+def compute_scores(
+    analysis: ComplianceAnalysis,
+    *,
+    weighted_m2: bool = False,
+) -> ComplianceScores:
     findings = analysis.findings
     if not findings:
         return ComplianceScores(
@@ -106,10 +110,16 @@ def compute_scores(analysis: ComplianceAnalysis) -> ComplianceScores:
 
     total_weight = sum(f.weight for f in findings)
 
-    m2 = _safe_div(
-        sum(ordinal_map.get(f.status, 0.0) for f in findings),
-        len(findings),
-    )
+    if weighted_m2:
+        m2 = _safe_div(
+            sum(ordinal_map.get(f.status, 0.0) * f.weight for f in findings),
+            total_weight,
+        )
+    else:
+        m2 = _safe_div(
+            sum(ordinal_map.get(f.status, 0.0) for f in findings),
+            len(findings),
+        )
 
     m3 = _safe_div(
         sum(

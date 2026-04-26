@@ -16,12 +16,14 @@ from app.services.compliance_methods.compliance_method_common import (
     assemble_compliance_analysis,
     build_compliance_prompt,
     build_compliance_result_path,
+    flatten_record_sections,
     normalize_requirement_finding,
     normalize_requirement_linked_row,
     parse_compliance_analysis_response,
     serialize_deliverable_for_prompt,
     serialize_retrieved_section,
     simplify_document_for_prompt,
+    verify_finding_against_full_record_sections,
 )
 from app.services.compliance_methods.record_retrieval_stage_service import (
     RECORD_FINAL_TOP_K,
@@ -168,6 +170,7 @@ def _run_stage_1_non_rag(
     instructions: str | None,
     allowed_record_documents: set[str],
 ) -> ComplianceStageResult:
+    full_record_sections = flatten_record_sections(case_payload.get("records", []))
     prompt = build_compliance_prompt(
         method="non_rag",
         payload={
@@ -190,6 +193,17 @@ def _run_stage_1_non_rag(
         expected_count=len(deliverables),
         allowed_record_documents=allowed_record_documents,
     )
+    validated_findings = [
+        verify_finding_against_full_record_sections(
+            finding=finding,
+            record_sections=full_record_sections,
+        )
+        for finding in (analysis.procedure_to_record or analysis.findings)
+    ]
+    analysis = assemble_compliance_analysis(
+        findings=validated_findings,
+        linked_rows=analysis.linked_rows,
+    )
     analysis = enrich_analysis_for_scoring(
         analysis,
         requirement_weights=_extract_deliverable_weights(deliverables),
@@ -206,7 +220,7 @@ def _run_stage_1_non_rag(
         stage_label=STAGE_LABELS[STAGE_1_KEY],
         method="non_rag",
         analysis=analysis,
-        scores=compute_scores(analysis),
+        scores=compute_scores(analysis, weighted_m2=True),
         retrieval_metrics=None,
     )
 
@@ -254,6 +268,7 @@ def _run_stage_2_record_retrieval(
         allowed_record_documents=allowed_record_documents,
         stage_key=STAGE_2_KEY,
         stage_label=STAGE_LABELS[STAGE_2_KEY],
+        requirement_weights=_extract_deliverable_weights(deliverables),
     )
     analysis = _strip_stage_feedback(analysis)
     retrieval_metrics = compute_record_recall_at_k(
@@ -266,7 +281,7 @@ def _run_stage_2_record_retrieval(
         stage_label=STAGE_LABELS[STAGE_2_KEY],
         method="record_retrieval_stage",
         analysis=analysis,
-        scores=compute_scores(analysis),
+        scores=compute_scores(analysis, weighted_m2=True),
         retrieval_metrics=retrieval_metrics,
     )
 
@@ -314,6 +329,7 @@ def _run_stage_3_reference_retrieval(
         allowed_record_documents=allowed_record_documents,
         stage_key=STAGE_3_KEY,
         stage_label=STAGE_LABELS[STAGE_3_KEY],
+        requirement_weights=_extract_deliverable_weights(deliverables),
     )
     retrieval_metrics = compute_record_recall_at_k(
         findings=analysis.procedure_to_record or analysis.findings,
@@ -325,7 +341,7 @@ def _run_stage_3_reference_retrieval(
         stage_label=STAGE_LABELS[STAGE_3_KEY],
         method="two_stage_rag",
         analysis=analysis,
-        scores=compute_scores(analysis),
+        scores=compute_scores(analysis, weighted_m2=True),
         retrieval_metrics=retrieval_metrics,
     )
 
@@ -371,6 +387,7 @@ def _merge_stage_analysis(
     allowed_record_documents: set[str],
     stage_key: str,
     stage_label: str,
+    requirement_weights: list[float] | None = None,
 ) -> ComplianceAnalysis:
     previous_findings = previous_analysis.procedure_to_record or previous_analysis.findings
     previous_rows = previous_analysis.linked_rows
@@ -427,7 +444,7 @@ def _merge_stage_analysis(
     )
     analysis = enrich_analysis_for_scoring(
         analysis,
-        requirement_weights=_extract_deliverable_weights(deliverables),
+        requirement_weights=requirement_weights,
     )
     return apply_computed_overall_assessment(analysis)
 
@@ -696,6 +713,8 @@ def _is_requirement_improved(
     candidate_rank = _status_rank(candidate_finding.status)
     if candidate_rank < previous_rank:
         return False
+    if candidate_rank == previous_rank:
+        return False
 
     previous_evidence_keys = {
         _normalize_evidence_key(item.text)
@@ -713,17 +732,7 @@ def _is_requirement_improved(
     }
 
     has_new_citations = bool(candidate_evidence_keys - previous_evidence_keys)
-    if candidate_rank > previous_rank:
-        return has_new_citations or not previous_evidence_keys
-    if not has_new_citations:
-        return False
-
-    previous_sources = {normalize_whitespace(item) for item in previous_finding.source_documents if normalize_whitespace(item)}
-    candidate_sources = {normalize_whitespace(item) for item in candidate_finding.source_documents if normalize_whitespace(item)}
-    if candidate_sources - previous_sources:
-        return True
-
-    return has_new_citations
+    return has_new_citations or not previous_evidence_keys
 
 
 def _select_merged_row(

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from app.schemas.compliance import (
     ComplianceAnalysis,
+    ComplianceEvidenceItem,
     ComplianceFinding,
     ComplianceLinkedRow,
     ComplianceMethod,
@@ -130,6 +131,7 @@ def build_shared_output_instructions(
         "- Treat extracted deliverables as the canonical requirement source.",
         "- Evaluate only requirement-to-record content match. Do not assume any preferred record template, section set, field set, workflow, or document style unless the requirement itself states it.",
         "- Provide evidence as short quote-based plain text grounded in admissible record evidence.",
+        "- Do not use evidence fields for commentary, absence statements, reasoning, conclusions, or recommendations.",
         "- Do not invent requirements, evidence, sections, systems, roles, or context.",
         "Status definitions:",
         "- satisfied: all required elements are supported by admissible record evidence, either explicitly or through clear equivalent structured evidence.",
@@ -422,6 +424,7 @@ def normalize_requirement_finding(
     retrieved_record_sections: list[dict[str, Any]],
     allowed_record_documents: set[str],
 ) -> ComplianceFinding:
+    normalized_evidence = normalize_string_list(finding.evidence)
     normalized = finding.model_copy(
         update={
             "source_documents": sanitize_source_documents(
@@ -429,7 +432,18 @@ def normalize_requirement_finding(
                 allowed=allowed_record_documents,
                 fallback=[item.get("source_document") for item in retrieved_record_sections],
             ),
-            "evidence": normalize_string_list(finding.evidence),
+            "evidence": normalized_evidence,
+            "evidence_items": [
+                ComplianceEvidenceItem(
+                    text=evidence,
+                    source_documents=sanitize_source_documents(
+                        finding.source_documents,
+                        allowed=allowed_record_documents,
+                        fallback=[item.get("source_document") for item in retrieved_record_sections],
+                    ),
+                )
+                for evidence in normalized_evidence
+            ],
         }
     )
     return verify_finding_against_retrieved_sections(
@@ -614,6 +628,40 @@ def verify_finding_against_retrieved_sections(
     )
 
 
+def verify_finding_against_full_record_sections(
+    *,
+    finding: ComplianceFinding,
+    record_sections: list[dict[str, Any]],
+) -> ComplianceFinding:
+    supported_evidence = [
+        evidence
+        for evidence in finding.evidence
+        if evidence_supported_by_sections(evidence, record_sections)
+    ]
+    next_status = finding.status
+    next_sources = list(finding.source_documents)
+    if not supported_evidence:
+        next_sources = []
+        if finding.status == "satisfied":
+            next_status = "partial"
+        elif finding.status == "partial":
+            next_status = "not_satisfied"
+    return finding.model_copy(
+        update={
+            "status": next_status,
+            "evidence": supported_evidence,
+            "source_documents": next_sources,
+            "evidence_items": [
+                ComplianceEvidenceItem(
+                    text=evidence,
+                    source_documents=next_sources,
+                )
+                for evidence in supported_evidence
+            ],
+        }
+    )
+
+
 def evidence_supported_by_sections(evidence: str, sections: list[dict[str, Any]]) -> bool:
     normalized_evidence = normalize_whitespace(evidence).lower()
     if not normalized_evidence:
@@ -731,6 +779,74 @@ def _normalize_finding_source_documents(
             ),
         }
     )
+
+
+def flatten_record_sections(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        parsed_json = record.get("parsed_json") or {}
+        source_document = (
+            record.get("source_filename")
+            or record.get("stored_filename")
+            or parsed_json.get("source_filename")
+            or parsed_json.get("stored_filename")
+            or ""
+        )
+        flattened.extend(
+            _flatten_record_sections(
+                parsed_json.get("sections", []),
+                source_document=str(source_document),
+            )
+        )
+    return flattened
+
+
+def _flatten_record_sections(
+    sections: list[dict[str, Any]],
+    *,
+    source_document: str,
+    parent_headings: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    lineage = parent_headings or []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        heading_title = normalize_whitespace(section.get("heading_title") or "")
+        headings = [*lineage, heading_title] if heading_title else [*lineage]
+        combined_heading = " / ".join(part for part in headings if part)
+        flattened.append(
+            {
+                "source_document": source_document,
+                "section_label": section.get("section_label"),
+                "heading_title": combined_heading or section.get("heading_title") or "",
+                "text": section.get("text"),
+                "table_markdown": section.get("table_markdown"),
+            }
+        )
+        tables = section.get("tables", [])
+        if isinstance(tables, list):
+            for table in tables:
+                if isinstance(table, dict) and table.get("markdown"):
+                    flattened.append(
+                        {
+                            "source_document": source_document,
+                            "section_label": section.get("section_label"),
+                            "heading_title": combined_heading or section.get("heading_title") or "",
+                            "text": "",
+                            "table_markdown": table.get("markdown"),
+                        }
+                    )
+        flattened.extend(
+            _flatten_record_sections(
+                section.get("subsections", []),
+                source_document=source_document,
+                parent_headings=headings,
+            )
+        )
+    return flattened
 
 
 def _sanitize_linked_row_recommendation(row: ComplianceLinkedRow) -> ComplianceLinkedRow:
