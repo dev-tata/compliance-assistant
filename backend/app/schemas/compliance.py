@@ -75,8 +75,6 @@ class ComplianceEvidenceItem(BaseModel):
     source_document: str = ""
     stage_key: str | None = None
     stage_label: str | None = None
-    is_valid_for_requirement: bool = True
-    invalid_reason: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -90,11 +88,6 @@ class ComplianceEvidenceItem(BaseModel):
         data["source_document"] = _normalize_source_document(
             data.get("source_document", data.get("source_documents"))
         )
-        data["is_valid_for_requirement"] = bool(
-            data.get("is_valid_for_requirement", True)
-        )
-        invalid_reason = data.get("invalid_reason")
-        data["invalid_reason"] = str(invalid_reason).strip() if invalid_reason else None
         return data
 
 class ComplianceLinkedRow(BaseModel):

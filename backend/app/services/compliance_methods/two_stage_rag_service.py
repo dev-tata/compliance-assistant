@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import re
 from typing import Any
 
 from app.schemas.compliance import (
@@ -53,12 +51,6 @@ STAGE_LABELS = {
     STAGE_1_KEY: "Stage 1 - Non-RAG",
     STAGE_2_KEY: "Stage 2 - Record Retrieval",
     STAGE_3_KEY: "Stage 3 - Reference Retrieval",
-}
-CONSISTENCY_LABEL_RANKS = {
-    "low": 1,
-    "medium": 2,
-    "high": 3,
-    "critical": 4,
 }
 
 
@@ -188,11 +180,26 @@ def _run_stage_1_non_rag(
             "records": [
                 simplify_document_for_prompt(document) for document in case_payload.get("records", [])
             ],
+            "workflow_rules": [
+                "Treat explicit contradictions inside the record as material non-compliance findings, not as satisfied support.",
+                "If a table-derived highest or overall value conflicts with a recorded overall statement, reflect that contradiction directly in the status, rationale, gap, and recommendation.",
+                "Do not mark a requirement as satisfied when the record contains grounded evidence that the required value is inconsistent or incorrectly recorded.",
+            ],
         },
         instructions=instructions,
+        include_feedback=True,
+        llm_sets_status=True,
+    )
+    raw_analysis = llm_service.generate(prompt, temperature=0.0)
+    model_analysis = parse_compliance_analysis_response(
+        raw_analysis=raw_analysis,
+        method="non_rag",
+        expected_count=len(deliverables),
+        allowed_record_documents=allowed_record_documents,
+        preserve_status=True,
     )
     analysis = parse_compliance_analysis_response(
-        raw_analysis=llm_service.generate(prompt, temperature=0.0),
+        raw_analysis=raw_analysis,
         method="non_rag",
         expected_count=len(deliverables),
         allowed_record_documents=allowed_record_documents,
@@ -212,6 +219,10 @@ def _run_stage_1_non_rag(
         analysis,
         requirement_weights=_extract_deliverable_weights(deliverables),
         deliverable_metadata=deliverables,
+    )
+    analysis = _restore_model_judgement_floor(
+        candidate_analysis=analysis,
+        model_analysis=model_analysis,
     )
     analysis = assemble_compliance_analysis(
         findings=analysis.procedure_to_record or analysis.findings,
@@ -250,7 +261,7 @@ def _run_stage_2_record_retrieval(
                 retrieved_payload=retrieved_payload,
                 include_reference_context=False,
                 include_baseline=False,
-                include_feedback=False,
+                include_feedback=True,
             ),
             "workflow_rules": [
                 "Treat the original deliverable as the canonical requirement source.",
@@ -259,7 +270,7 @@ def _run_stage_2_record_retrieval(
             ],
         },
         instructions=instructions,
-        include_feedback=False,
+        include_feedback=True,
     )
     raw_analysis = parse_compliance_analysis_response(
         raw_analysis=llm_service.generate(prompt, temperature=0.0),
@@ -275,7 +286,6 @@ def _run_stage_2_record_retrieval(
         stage_label=STAGE_LABELS[STAGE_2_KEY],
         requirement_weights=_extract_deliverable_weights(deliverables),
     )
-    analysis = _strip_stage_feedback(analysis)
     retrieval_metrics = compute_record_recall_at_k(
         findings=analysis.procedure_to_record or analysis.findings,
         retrieved_payload=retrieved_payload,
@@ -310,7 +320,7 @@ def _run_stage_3_reference_retrieval(
                 retrieved_payload=retrieved_payload,
                 include_reference_context=True,
                 include_baseline=False,
-                include_feedback=False,
+                include_feedback=True,
             ),
             "workflow_rules": [
                 "Treat the original deliverable as the canonical requirement source.",
@@ -321,6 +331,7 @@ def _run_stage_3_reference_retrieval(
             ],
         },
         instructions=instructions,
+        include_feedback=True,
     )
     raw_analysis = parse_compliance_analysis_response(
         raw_analysis=llm_service.generate(prompt, temperature=0.0),
@@ -444,13 +455,6 @@ def _normalize_retrieval_stage_analysis(
         requirement_weights=requirement_weights,
         deliverable_metadata=deliverables,
     )
-    if stage_key == STAGE_2_KEY:
-        analysis = _apply_stage_2_consistency_penalties(
-            analysis=analysis,
-            deliverables=deliverables,
-            linked_rows=analysis.linked_rows,
-            retrieved_payload=retrieved_payload,
-        )
     return assemble_compliance_analysis(
         findings=analysis.procedure_to_record or analysis.findings,
         linked_rows=analysis.linked_rows,
@@ -764,377 +768,6 @@ def _build_stage_3_reference_query(
     )
 
 
-def _strip_stage_feedback(analysis: ComplianceAnalysis) -> ComplianceAnalysis:
-    stripped_rows = [
-        row.model_copy(
-            update={
-                "gap": "",
-                "recommendation": "",
-            }
-        )
-        for row in analysis.linked_rows
-    ]
-    return analysis.model_copy(
-        update={
-            "linked_rows": stripped_rows,
-            "gaps": [],
-            "recommended_actions": [],
-        }
-    )
-
-
-def _apply_stage_2_consistency_penalties(
-    *,
-    analysis: ComplianceAnalysis,
-    deliverables: list[dict[str, Any]],
-    linked_rows: list[ComplianceLinkedRow],
-    retrieved_payload: list[dict[str, Any]],
-) -> ComplianceAnalysis:
-    findings = analysis.procedure_to_record or analysis.findings
-    penalized_findings: list[ComplianceFinding] = []
-
-    for index, finding in enumerate(findings):
-        row = linked_rows[index] if index < len(linked_rows) else None
-        deliverable = deliverables[index] if index < len(deliverables) else {}
-        retrieved_sections = (
-            retrieved_payload[index].get("retrieved_record_sections", [])
-            if index < len(retrieved_payload)
-            else []
-        )
-        penalty = _derive_stage_structured_penalty(
-            requirement=finding.requirement,
-            deliverable=deliverable,
-            retrieved_record_sections=retrieved_sections,
-        )
-        if penalty["coverage_cap"] >= 100 and penalty["strength_factor"] >= 1.0:
-            penalty = _derive_stage_2_rationale_penalty(
-                requirement=finding.requirement,
-                rationale=row.rationale if row else "",
-                deliverable=deliverable,
-            )
-        if penalty["coverage_cap"] >= 100 and penalty["strength_factor"] >= 1.0:
-            penalized_findings.append(finding)
-            continue
-
-        invalid_reason = str(penalty.get("invalid_reason") or "invalid_for_requirement")
-        invalidated_items = [
-            item.model_copy(
-                update={
-                    "is_valid_for_requirement": False,
-                    "invalid_reason": invalid_reason,
-                }
-            )
-            for item in finding.evidence_items
-        ]
-        if row is not None:
-            linked_rows[index] = row.model_copy(
-                update={
-                    "rationale": (
-                        row.rationale
-                        .replace(f"Grounded evidence excluded from scoring: {invalid_reason.replace('_', ' ')}.", "")
-                        .strip()
-                    )
-                }
-            )
-        penalized_findings.append(
-            finding.model_copy(
-                update={
-                    "evidence_items": invalidated_items,
-                    "evidence_breadth": 0,
-                }
-            )
-        )
-
-    rescored = enrich_analysis_for_scoring(
-        analysis.model_copy(
-            update={
-                "procedure_to_record": penalized_findings,
-                "findings": penalized_findings,
-                "linked_rows": linked_rows,
-            }
-        ),
-        deliverable_metadata=deliverables,
-    )
-    return rescored.model_copy(
-        update={
-            "linked_rows": linked_rows,
-        }
-    )
-
-
-def _derive_stage_structured_penalty(
-    *,
-    requirement: str,
-    deliverable: dict[str, Any],
-    retrieved_record_sections: list[dict[str, Any]],
-) -> dict[str, object]:
-    requirement_text = normalize_whitespace(requirement).lower()
-    deliverable_text = normalize_whitespace(deliverable.get("requirement_text") or "").lower()
-    combined_requirement = " ".join(part for part in (requirement_text, deliverable_text) if part)
-    dimension = _infer_consistency_dimension(combined_requirement)
-    if not dimension:
-        return {"coverage_cap": 100.0, "strength_factor": 1.0}
-
-    requires_overall = "overall" in combined_requirement
-    requires_highest = "highest" in combined_requirement or "determined by" in combined_requirement
-    requires_recorded = any(marker in combined_requirement for marker in ("recorded", "documented"))
-    if not requires_overall and not requires_highest:
-        return {"coverage_cap": 100.0, "strength_factor": 1.0}
-
-    signals = _collect_dimension_signals(
-        retrieved_record_sections=retrieved_record_sections,
-        dimension=dimension,
-    )
-    derived_max = signals["derived_max"]
-    stated_highest = signals["stated_highest"]
-    stated_overall = signals["stated_overall"]
-
-    if requires_highest and derived_max and stated_highest and derived_max != stated_highest:
-        return {
-            "coverage_cap": 19.0,
-            "strength_factor": 0.35,
-            "invalid_reason": "contradicts_table_derived_highest_value",
-        }
-    if requires_overall and derived_max and stated_overall and derived_max != stated_overall:
-        return {
-            "coverage_cap": 19.0,
-            "strength_factor": 0.35,
-            "invalid_reason": "contradicts_table_derived_overall_value",
-        }
-    if requires_recorded and requires_overall and derived_max and not stated_overall:
-        return {
-            "coverage_cap": 19.0,
-            "strength_factor": 0.6,
-            "invalid_reason": "missing_explicit_overall_value",
-        }
-    if requires_highest and derived_max and not stated_highest:
-        return {
-            "coverage_cap": 19.0,
-            "strength_factor": 0.6,
-            "invalid_reason": "missing_explicit_highest_value",
-        }
-    return {"coverage_cap": 100.0, "strength_factor": 1.0}
-
-
-def _derive_stage_2_rationale_penalty(
-    *,
-    requirement: str,
-    rationale: str,
-    deliverable: dict[str, Any],
-) -> dict[str, object]:
-    rationale_text = normalize_whitespace(rationale).lower()
-    requirement_text = normalize_whitespace(requirement).lower()
-    deliverable_text = normalize_whitespace(deliverable.get("requirement_text") or "").lower()
-    combined_requirement = " ".join(part for part in (requirement_text, deliverable_text) if part)
-
-    if not rationale_text:
-        return {"coverage_cap": 100.0, "strength_factor": 1.0}
-
-    hierarchy_markers = (
-        "wrong level",
-        "higher level",
-        "highest level",
-        "top level",
-        "top-level",
-        "hierarchy",
-        "broader level",
-        "general level",
-    )
-    weak_support_markers = (
-        "general only",
-        "broader than required",
-        "not explicit",
-        "implicit",
-        "indirect",
-        "unclear",
-        "ambiguous",
-        "does not specify",
-        "not specified",
-        "missing specific",
-    )
-    missing_markers = (
-        "missing",
-        "absent",
-        "not provided",
-        "not stated",
-        "not documented",
-        "not captured",
-    )
-
-    has_hierarchy_marker = any(marker in rationale_text for marker in hierarchy_markers)
-    has_weak_support_marker = any(marker in rationale_text for marker in weak_support_markers)
-    has_missing_marker = any(marker in rationale_text for marker in missing_markers)
-    expects_high_level = any(
-        marker in combined_requirement
-        for marker in ("highest level", "top level", "top-level", "overall", "classification")
-    )
-
-    if has_hierarchy_marker and (has_missing_marker or has_weak_support_marker or expects_high_level):
-        return {
-            "coverage_cap": 19.0,
-            "strength_factor": 0.35,
-            "invalid_reason": "rationale_hierarchy_mismatch",
-        }
-    if has_hierarchy_marker or (expects_high_level and has_weak_support_marker):
-        return {
-            "coverage_cap": 49.0,
-            "strength_factor": 0.6,
-            "invalid_reason": "rationale_scope_or_level_mismatch",
-        }
-    if has_weak_support_marker:
-        return {
-            "coverage_cap": 79.0,
-            "strength_factor": 0.85,
-            "invalid_reason": "rationale_weak_or_indirect_support",
-        }
-    return {"coverage_cap": 100.0, "strength_factor": 1.0}
-
-
-def _infer_consistency_dimension(requirement_text: str) -> str | None:
-    if "criticality" in requirement_text:
-        return "criticality"
-    if "complexity" in requirement_text:
-        return "complexity"
-    if "risk class" in requirement_text or "classification" in requirement_text:
-        return "risk class"
-    return None
-
-
-def _collect_dimension_signals(
-    *,
-    retrieved_record_sections: list[dict[str, Any]],
-    dimension: str,
-) -> dict[str, str]:
-    normalized_dimension = dimension.lower()
-    prose_chunks: list[str] = []
-    table_values: list[str] = []
-
-    for section in retrieved_record_sections:
-        prose_chunks.append(normalize_whitespace(section.get("text") or ""))
-        prose_chunks.append(normalize_whitespace(section.get("table_markdown") or ""))
-        table_markdown = section.get("table_markdown")
-        if isinstance(table_markdown, str) and table_markdown.strip():
-            table_values.extend(
-                _extract_dimension_values_from_table(
-                    table_markdown=table_markdown,
-                    dimension=normalized_dimension,
-                )
-            )
-
-    prose_text = "\n".join(chunk for chunk in prose_chunks if chunk).lower()
-    return {
-        "derived_max": _derive_max_ranked_value(table_values),
-        "stated_highest": _extract_ranked_claim_value(
-            prose_text=prose_text,
-            dimension=normalized_dimension,
-            claim_type="highest",
-        ),
-        "stated_overall": _extract_ranked_claim_value(
-            prose_text=prose_text,
-            dimension=normalized_dimension,
-            claim_type="overall",
-        ),
-    }
-
-
-def _extract_dimension_values_from_table(*, table_markdown: str, dimension: str) -> list[str]:
-    rows = _parse_table_markdown(table_markdown)
-    if not rows:
-        return []
-
-    aliases = _dimension_column_aliases(dimension)
-    values: list[str] = []
-    for row in rows:
-        for column_name, value in row.items():
-            if _normalize_key(column_name) in aliases:
-                normalized = _normalize_ranked_value(value)
-                if normalized:
-                    values.append(normalized)
-                break
-    return values
-
-
-def _parse_table_markdown(table_markdown: str) -> list[dict[str, str]]:
-    lines = [line.strip() for line in str(table_markdown or "").splitlines() if line.strip()]
-    if len(lines) < 3 or "|" not in lines[0]:
-        return []
-
-    headers = [cell.strip() for cell in lines[0].strip("|").split("|")]
-    if not headers:
-        return []
-
-    rows: list[dict[str, str]] = []
-    for raw_line in lines[2:]:
-        if "|" not in raw_line:
-            continue
-        cells = [cell.strip() for cell in raw_line.strip("|").split("|")]
-        if len(cells) != len(headers):
-            continue
-        rows.append(dict(zip(headers, cells, strict=False)))
-    return rows
-
-
-def _dimension_column_aliases(dimension: str) -> set[str]:
-    if dimension == "criticality":
-        return {"criticality", "criticality level"}
-    if dimension == "complexity":
-        return {"complexity", "complexity level"}
-    return {"risk class", "risk classification", "overall risk classification", "classification"}
-
-
-def _normalize_key(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().lower())
-
-
-def _normalize_ranked_value(value: str) -> str | None:
-    normalized = re.sub(r"[^a-z]+", " ", str(value or "").strip().lower())
-    tokens = [token for token in normalized.split() if token]
-    for token in tokens:
-        if token in CONSISTENCY_LABEL_RANKS:
-            return token
-    return None
-
-
-def _derive_max_ranked_value(values: list[str]) -> str | None:
-    ranked_values = [value for value in values if value in CONSISTENCY_LABEL_RANKS]
-    if not ranked_values:
-        return None
-    return max(ranked_values, key=lambda item: CONSISTENCY_LABEL_RANKS[item])
-
-
-def _extract_ranked_claim_value(
-    *,
-    prose_text: str,
-    dimension: str,
-    claim_type: str,
-) -> str | None:
-    dimension_pattern = re.escape(dimension).replace(r"\ ", r"\s+")
-    if claim_type == "highest":
-        patterns = (
-            rf"highest(?:\s+observed)?(?:\s+major\s+system\s+function|\s+system\s+function|\s+function)?\s+{dimension_pattern}(?:\s+level)?(?:[^a-z]{{0,30}})?(?:is|:)\s+(low|medium|high|critical)\b",
-            rf"highest(?:[^a-z]{{0,30}}){dimension_pattern}(?:\s+level)?(?:[^a-z]{{0,30}})?\b(low|medium|high|critical)\b",
-        )
-    else:
-        patterns = (
-            rf"overall(?:\s+system)?\s+{dimension_pattern}(?:\s+level|\s+classification|\s+class|\s+risk\s+level)?(?:[^a-z]{{0,30}})?(?:is|:)\s+(low|medium|high|critical)\b",
-            rf"combining\s+overall\s+{dimension_pattern}\s+(low|medium|high|critical)\b",
-        )
-
-    for pattern in patterns:
-        match = re.search(pattern, prose_text, flags=re.IGNORECASE)
-        if match:
-            return _normalize_ranked_value(match.group(1))
-    return None
-
-
-def _coverage_percent_to_status(requirement_coverage_percent: int) -> str:
-    if requirement_coverage_percent >= 80:
-        return "satisfied"
-    if requirement_coverage_percent >= 20:
-        return "partial"
-    return "not_satisfied"
-
-
 def _status_rank(status: str) -> int:
     order = {
         "not_satisfied": 0,
@@ -1142,6 +775,116 @@ def _status_rank(status: str) -> int:
         "satisfied": 2,
     }
     return order.get(status, -1)
+
+
+def _restore_model_judgement_floor(
+    *,
+    candidate_analysis: ComplianceAnalysis,
+    model_analysis: ComplianceAnalysis,
+) -> ComplianceAnalysis:
+    candidate_findings = candidate_analysis.procedure_to_record or candidate_analysis.findings
+    candidate_rows = candidate_analysis.linked_rows
+    model_findings = model_analysis.procedure_to_record or model_analysis.findings
+    model_rows = model_analysis.linked_rows
+
+    restored_findings: list[ComplianceFinding] = []
+    restored_rows: list[ComplianceLinkedRow] = []
+    for index, candidate_finding in enumerate(candidate_findings):
+        model_finding = model_findings[index] if index < len(model_findings) else None
+        model_row = model_rows[index] if index < len(model_rows) else None
+        candidate_row = candidate_rows[index] if index < len(candidate_rows) else None
+
+        if (
+            model_finding is None
+            or _status_rank(model_finding.status) >= _status_rank(candidate_finding.status)
+            or not _should_preserve_contradiction_judgement(model_row)
+        ):
+            restored_findings.append(candidate_finding)
+            restored_rows.append(candidate_row if candidate_row is not None else model_row)
+            continue
+
+        restored_findings.append(
+            _align_finding_scores_to_status(
+                candidate_finding.model_copy(
+                    update={
+                        "status": model_finding.status,
+                    }
+                )
+            )
+        )
+        restored_rows.append(
+            (candidate_row if candidate_row is not None else model_row).model_copy(
+                update={
+                    "status": model_finding.status,
+                    "rationale": model_row.rationale if model_row else (candidate_row.rationale if candidate_row else ""),
+                    "gap": model_row.gap if model_row else (candidate_row.gap if candidate_row else ""),
+                    "recommendation": (
+                        model_row.recommendation
+                        if model_row
+                        else (candidate_row.recommendation if candidate_row else "")
+                    ),
+                }
+            )
+            if (candidate_row is not None or model_row is not None)
+            else ComplianceLinkedRow(
+                requirement_ref=f"REQ-{index + 1}",
+                requirement=candidate_finding.requirement,
+                status=model_finding.status,
+                rationale="",
+                gap="",
+                recommendation="",
+            )
+        )
+
+    return candidate_analysis.model_copy(
+        update={
+            "procedure_to_record": restored_findings,
+            "findings": restored_findings,
+            "linked_rows": restored_rows,
+        }
+    )
+
+
+def _should_preserve_contradiction_judgement(row: ComplianceLinkedRow | None) -> bool:
+    rationale = normalize_whitespace(row.rationale if row else "").lower()
+    if not rationale:
+        return False
+    contradiction_markers = (
+        "does not match",
+        "do not match",
+        "mismatch",
+        "conflict",
+        "conflicts with",
+        "contradict",
+        "contradiction",
+        "inconsistent",
+        "incorrectly states",
+        "incorrectly records",
+        "incorrectly classified",
+        "highest criticality as",
+        "highest observed function criticality",
+        "highest function criticality",
+        "but the",
+    )
+    return any(marker in rationale for marker in contradiction_markers)
+
+
+def _align_finding_scores_to_status(finding: ComplianceFinding) -> ComplianceFinding:
+    if finding.status == "satisfied":
+        return finding
+    if finding.status == "partial":
+        return finding.model_copy(
+            update={
+                "requirement_coverage_percent": min(int(finding.requirement_coverage_percent or 0), 49),
+                "evidence_strength": min(float(finding.evidence_strength or 0.0), 0.49),
+            }
+        )
+    return finding.model_copy(
+        update={
+            "requirement_coverage_percent": 0,
+            "evidence_strength": min(float(finding.evidence_strength or 0.0), 0.19),
+        }
+    )
 
 
 def _select_requirement_merge_mode(
