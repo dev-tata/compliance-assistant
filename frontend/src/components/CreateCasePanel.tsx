@@ -76,7 +76,6 @@ export function CreateCasePanel({
               {formatDocumentType(doc.document_type)} · {doc.group_id ?? "no-group"} · {formatLanguage(doc.language)}
               {" · "}Created: {formatDateTime(doc.created_at)}
               {showExtraction && extractionInfo ? ` · Extraction: ${extractionInfo.provider} · ${extractionInfo.model}` : ""}
-              {doc.frozen ? " · Edit protection enabled" : ""}
             </span>
           </span>
         </label>

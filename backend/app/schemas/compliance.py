@@ -115,6 +115,8 @@ class ComplianceAnalysis(BaseModel):
     weighted_completion_percent: int = Field(default=0, ge=0, le=100)
     overall_coverage_percent: int = Field(default=0, ge=0, le=100)
     weighted_coverage_percent: int = Field(default=0, ge=0, le=100)
+    average_evidence_strength: float = Field(default=0.0, ge=0.0, le=1.0)
+    weighted_average_evidence_strength: float = Field(default=0.0, ge=0.0, le=1.0)
     gaps: list[str] = Field(default_factory=list)
     linked_rows: list[ComplianceLinkedRow] = Field(default_factory=list)
     findings: list[ComplianceFinding] = Field(default_factory=list)
@@ -162,6 +164,7 @@ class SectionMatch(BaseModel):
 
 class RetrievalMetrics(BaseModel):
     record_recall_at_k: float | None = Field(default=None, ge=0.0, le=1.0)
+    average_record_recall_at_k: float | None = Field(default=None, ge=0.0, le=1.0)
     record_k: int | None = Field(default=None, ge=1)
     evaluated_requirements: int = Field(default=0, ge=0)
     hit_requirements: int = Field(default=0, ge=0)

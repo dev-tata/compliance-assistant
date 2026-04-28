@@ -535,18 +535,44 @@ def compute_weighted_coverage_percent(findings: list[ComplianceFinding]) -> int:
     return round(total_score / total_weight)
 
 
+def compute_average_evidence_strength(findings: list[ComplianceFinding]) -> float:
+    if not findings:
+        return 0.0
+    return round(
+        sum(float(finding.evidence_strength or 0.0) for finding in findings) / len(findings),
+        4,
+    )
+
+
+def compute_weighted_average_evidence_strength(findings: list[ComplianceFinding]) -> float:
+    if not findings:
+        return 0.0
+    total_weight = sum(float(finding.weight or 0.0) for finding in findings)
+    if total_weight <= 0:
+        return compute_average_evidence_strength(findings)
+    total_score = sum(
+        float(finding.evidence_strength or 0.0) * float(finding.weight or 0.0)
+        for finding in findings
+    )
+    return round(total_score / total_weight, 4)
+
+
 def apply_computed_analysis_metrics(analysis: ComplianceAnalysis) -> ComplianceAnalysis:
     findings = analysis.procedure_to_record or analysis.findings
     completion_percent = compute_completion_percent(findings)
     weighted_completion_percent = compute_weighted_completion_percent(findings)
     overall_coverage_percent = compute_overall_coverage_percent(findings)
     weighted_coverage_percent = compute_weighted_coverage_percent(findings)
+    average_evidence_strength = compute_average_evidence_strength(findings)
+    weighted_average_evidence_strength = compute_weighted_average_evidence_strength(findings)
     return analysis.model_copy(
         update={
             "completion_percent": completion_percent,
             "weighted_completion_percent": weighted_completion_percent,
             "overall_coverage_percent": overall_coverage_percent,
             "weighted_coverage_percent": weighted_coverage_percent,
+            "average_evidence_strength": average_evidence_strength,
+            "weighted_average_evidence_strength": weighted_average_evidence_strength,
         }
     )
 
@@ -600,6 +626,8 @@ def assemble_compliance_analysis(
         weighted_completion_percent=0,
         overall_coverage_percent=0,
         weighted_coverage_percent=0,
+        average_evidence_strength=0.0,
+        weighted_average_evidence_strength=0.0,
         linked_rows=resolved_rows,
         findings=findings,
         procedure_to_record=findings,

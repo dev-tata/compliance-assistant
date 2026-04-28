@@ -438,6 +438,12 @@ def _normalize_retrieval_stage_analysis(
         requirement_weights=requirement_weights,
         deliverable_metadata=deliverables,
     )
+    if stage_key == STAGE_2_KEY:
+        analysis = _apply_stage_2_rationale_penalties(
+            analysis=analysis,
+            deliverables=deliverables,
+            linked_rows=analysis.linked_rows,
+        )
     return assemble_compliance_analysis(
         findings=analysis.procedure_to_record or analysis.findings,
         linked_rows=analysis.linked_rows,
@@ -768,6 +774,124 @@ def _strip_stage_feedback(analysis: ComplianceAnalysis) -> ComplianceAnalysis:
             "recommended_actions": [],
         }
     )
+
+
+def _apply_stage_2_rationale_penalties(
+    *,
+    analysis: ComplianceAnalysis,
+    deliverables: list[dict[str, Any]],
+    linked_rows: list[ComplianceLinkedRow],
+) -> ComplianceAnalysis:
+    findings = analysis.procedure_to_record or analysis.findings
+    penalized_findings: list[ComplianceFinding] = []
+
+    for index, finding in enumerate(findings):
+        row = linked_rows[index] if index < len(linked_rows) else None
+        deliverable = deliverables[index] if index < len(deliverables) else {}
+        penalty = _derive_stage_2_rationale_penalty(
+            requirement=finding.requirement,
+            rationale=row.rationale if row else "",
+            deliverable=deliverable,
+        )
+        if penalty["coverage_cap"] >= 100 and penalty["strength_factor"] >= 1.0:
+            penalized_findings.append(finding)
+            continue
+
+        next_coverage = min(
+            int(finding.requirement_coverage_percent or 0),
+            int(penalty["coverage_cap"]),
+        )
+        next_strength = min(
+            float(finding.evidence_strength or 0.0),
+            round(float(finding.evidence_strength or 0.0) * float(penalty["strength_factor"]), 4),
+        )
+        next_status = _coverage_percent_to_status(next_coverage)
+        penalized_findings.append(
+            finding.model_copy(
+                update={
+                    "requirement_coverage_percent": next_coverage,
+                    "evidence_strength": next_strength,
+                    "status": next_status,
+                }
+            )
+        )
+
+    return analysis.model_copy(
+        update={
+            "procedure_to_record": penalized_findings,
+            "findings": penalized_findings,
+        }
+    )
+
+
+def _derive_stage_2_rationale_penalty(
+    *,
+    requirement: str,
+    rationale: str,
+    deliverable: dict[str, Any],
+) -> dict[str, float]:
+    rationale_text = normalize_whitespace(rationale).lower()
+    requirement_text = normalize_whitespace(requirement).lower()
+    deliverable_text = normalize_whitespace(deliverable.get("requirement_text") or "").lower()
+    combined_requirement = " ".join(part for part in (requirement_text, deliverable_text) if part)
+
+    if not rationale_text:
+        return {"coverage_cap": 100.0, "strength_factor": 1.0}
+
+    hierarchy_markers = (
+        "wrong level",
+        "higher level",
+        "highest level",
+        "top level",
+        "top-level",
+        "hierarchy",
+        "broader level",
+        "general level",
+    )
+    weak_support_markers = (
+        "general only",
+        "broader than required",
+        "not explicit",
+        "implicit",
+        "indirect",
+        "unclear",
+        "ambiguous",
+        "does not specify",
+        "not specified",
+        "missing specific",
+    )
+    missing_markers = (
+        "missing",
+        "absent",
+        "not provided",
+        "not stated",
+        "not documented",
+        "not captured",
+    )
+
+    has_hierarchy_marker = any(marker in rationale_text for marker in hierarchy_markers)
+    has_weak_support_marker = any(marker in rationale_text for marker in weak_support_markers)
+    has_missing_marker = any(marker in rationale_text for marker in missing_markers)
+    expects_high_level = any(
+        marker in combined_requirement
+        for marker in ("highest level", "top level", "top-level", "overall", "classification")
+    )
+
+    if has_hierarchy_marker and (has_missing_marker or has_weak_support_marker or expects_high_level):
+        return {"coverage_cap": 19.0, "strength_factor": 0.35}
+    if has_hierarchy_marker or (expects_high_level and has_weak_support_marker):
+        return {"coverage_cap": 49.0, "strength_factor": 0.6}
+    if has_weak_support_marker:
+        return {"coverage_cap": 79.0, "strength_factor": 0.85}
+    return {"coverage_cap": 100.0, "strength_factor": 1.0}
+
+
+def _coverage_percent_to_status(requirement_coverage_percent: int) -> str:
+    if requirement_coverage_percent >= 80:
+        return "satisfied"
+    if requirement_coverage_percent >= 20:
+        return "partial"
+    return "not_satisfied"
 
 
 def _status_rank(status: str) -> int:

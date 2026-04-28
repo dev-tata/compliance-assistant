@@ -56,8 +56,12 @@ def _enrich_finding(
         finding=normalized_finding,
         material_element_count=material_element_count,
     )
+    final_status = _derive_status_from_requirement_coverage_percent(
+        requirement_coverage_percent=requirement_coverage_percent,
+    )
     return normalized_finding.model_copy(
         update={
+            "status": final_status,
             "evidence_strength": evidence_strength,
             "weight": effective_weight,
             "material_element_count": material_element_count,
@@ -173,3 +177,14 @@ def _compute_requirement_coverage_percent(
         ) / max(1, finding.expected_evidence_breadth),
     )
     return round(100 * min(element_ratio, breadth_ratio))
+
+
+def _derive_status_from_requirement_coverage_percent(
+    *,
+    requirement_coverage_percent: int,
+) -> str:
+    if requirement_coverage_percent >= 80:
+        return "satisfied"
+    if requirement_coverage_percent >= 20:
+        return "partial"
+    return "not_satisfied"

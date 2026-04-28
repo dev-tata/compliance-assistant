@@ -109,6 +109,8 @@ export type ComplianceAnalysis = {
   weighted_completion_percent: number;
   overall_coverage_percent: number;
   weighted_coverage_percent: number;
+  average_evidence_strength: number;
+  weighted_average_evidence_strength: number;
   gaps: string[];
   linked_rows: ComplianceLinkedRow[];
   findings: ComplianceFinding[];
@@ -129,6 +131,7 @@ export type SectionMatch = {
 
 export type RetrievalMetrics = {
   record_recall_at_k: number | null;
+  average_record_recall_at_k: number | null;
   record_k: number | null;
   evaluated_requirements: number;
   hit_requirements: number;

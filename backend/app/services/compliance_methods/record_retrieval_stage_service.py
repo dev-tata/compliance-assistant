@@ -52,20 +52,29 @@ def compute_record_recall_at_k(
     if evaluated <= 0:
         return RetrievalMetrics(
             record_recall_at_k=0.0,
+            average_record_recall_at_k=0.0,
             record_k=k,
             evaluated_requirements=0,
             hit_requirements=0,
         )
 
     hit_requirements = 0
+    row_recalls: list[float] = []
     for index in range(evaluated):
         finding = findings[index]
         retrieved_sections = retrieved_payload[index].get("retrieved_record_sections", [])
-        if any(evidence_supported_by_sections(evidence, retrieved_sections) for evidence in finding.evidence):
+        hit = any(
+            evidence_supported_by_sections(evidence, retrieved_sections)
+            for evidence in finding.evidence
+        )
+        row_recalls.append(1.0 if hit else 0.0)
+        if hit:
             hit_requirements += 1
 
+    average_record_recall_at_k = round(sum(row_recalls) / len(row_recalls), 4) if row_recalls else 0.0
     return RetrievalMetrics(
-        record_recall_at_k=round(hit_requirements / evaluated, 4),
+        record_recall_at_k=average_record_recall_at_k,
+        average_record_recall_at_k=average_record_recall_at_k,
         record_k=k,
         evaluated_requirements=evaluated,
         hit_requirements=hit_requirements,

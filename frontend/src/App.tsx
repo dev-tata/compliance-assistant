@@ -119,6 +119,10 @@ function formatRecallMetric(value: number): string {
   return `${value.toFixed(4)} / 1.0`;
 }
 
+function formatStrengthPercent(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
 function summarizeStatuses(
   procedureToRecord: ComplianceResponse["analysis"]["procedure_to_record"] | ComplianceResponse["analysis"]["findings"],
 ): Record<"satisfied" | "partial" | "not_satisfied", number> {
@@ -192,6 +196,7 @@ function renderAssessmentBar({
   return `
     <div class="assessment">
       <span class="assessment-item assessment-item-edge-left">Completed <strong>${completedPercent}%</strong></span>
+      <span class="assessment-item">Weighted Completed <strong>${analysis.weighted_completion_percent}%</strong></span>
       <span class="assessment-item assessment-status-item">
         <span class="status status-satisfied">Satisfied</span>
         <span class="assessment-status-count">${statusSummary.satisfied}</span>
@@ -206,12 +211,13 @@ function renderAssessmentBar({
       </span>
     </div>
     <div class="assessment">
-      <span class="assessment-item">Weighted Completion <strong>${analysis.weighted_completion_percent}%</strong></span>
       <span class="assessment-item">Coverage <strong>${analysis.overall_coverage_percent}%</strong></span>
       <span class="assessment-item">Weighted Coverage <strong>${analysis.weighted_coverage_percent}%</strong></span>
+      <span class="assessment-item">Avg Evidence Strength <strong>${formatStrengthPercent(analysis.average_evidence_strength)}</strong></span>
+      <span class="assessment-item">Weighted Avg Strength <strong>${formatStrengthPercent(analysis.weighted_average_evidence_strength)}</strong></span>
       ${(typeof retrievalMetrics?.record_k === "number"
-        && typeof retrievalMetrics?.record_recall_at_k === "number")
-        ? `<span class="assessment-item">Recall@${retrievalMetrics.record_k} <strong>${formatRecallMetric(retrievalMetrics.record_recall_at_k)}</strong></span>`
+        && typeof (retrievalMetrics?.average_record_recall_at_k ?? retrievalMetrics?.record_recall_at_k) === "number")
+        ? `<span class="assessment-item">Avg Recall@${retrievalMetrics.record_k} <strong>${formatRecallMetric(retrievalMetrics.average_record_recall_at_k ?? retrievalMetrics.record_recall_at_k ?? 0)}</strong></span>`
         : ""}
     </div>
   `;
@@ -809,7 +815,6 @@ export default function App() {
         model,
         method: complianceMethod,
         instructions,
-        selectedDeliverablesByDocument,
         additionalDocumentFilenames: selectedAdditionalComplianceDocuments,
       });
       setLatestCompliance(result);
