@@ -1,9 +1,8 @@
 import type { FormEvent } from "react";
 
 import { FrozenBadge } from "./FrozenBadge";
-import type { CaseRecord, ComplianceMethod, DocumentRecord, LLMProviderDescriptor } from "../types";
+import type { CaseRecord, DocumentRecord, LLMProviderDescriptor } from "../types";
 import { documentTypeLabels, languageLabels } from "../constants";
-import { formatMethodLabel } from "../utils/formatMethodLabel";
 import { getModelOptions } from "../utils/llmModelOptions";
 import { formatDateTime } from "../utils/formatDateTime";
 
@@ -30,7 +29,6 @@ type CompliancePanelProps = {
   selectedCaseId: string;
   provider: string;
   model: string;
-  method: ComplianceMethod;
   instructions: string;
   selectedAdditionalDocuments: string[];
   busy: string;
@@ -38,7 +36,6 @@ type CompliancePanelProps = {
   onSelectCase: (caseId: string) => void;
   onProviderChange: (value: string) => void;
   onModelChange: (value: string) => void;
-  onMethodChange: (value: ComplianceMethod) => void;
   onInstructionsChange: (value: string) => void;
   onSelectedAdditionalDocumentsChange: (value: string[]) => void;
 };
@@ -51,7 +48,6 @@ export function CompliancePanel({
   selectedCaseId,
   provider,
   model,
-  method,
   instructions,
   selectedAdditionalDocuments,
   busy,
@@ -59,7 +55,6 @@ export function CompliancePanel({
   onSelectCase,
   onProviderChange,
   onModelChange,
-  onMethodChange,
   onInstructionsChange,
   onSelectedAdditionalDocumentsChange,
 }: CompliancePanelProps) {
@@ -80,12 +75,9 @@ export function CompliancePanel({
     (storedFilename) => !extractionInfoByDocument[storedFilename],
   );
   const hasReferencesForNested = selectedReferenceIds.length > 0 || selectedAdditionalDocuments.length > 0;
-  const methodHint = method === "non_rag"
-    ? "Uses extracted procedure deliverables plus full record JSON."
-    : "Uses extracted procedure deliverables, then a record-retrieval stage followed by a reference-informed upgrade stage.";
   const readinessMessage = missingProcedureExtraction.length > 0
     ? "Run deliverable extraction for all procedure documents before compliance."
-    : method === "two_stage_rag" && !hasReferencesForNested
+    : !hasReferencesForNested
       ? "Two-Stage RAG needs at least one reference document in the case or selected below."
       : "";
   const isSubmitDisabled = !selectedCaseId || busy === "compliance" || Boolean(readinessMessage);
@@ -120,50 +112,43 @@ export function CompliancePanel({
             </select>
           </label>
         </div>
-        <label className="field">
-          <span>Method</span>
-          <select value={method} onChange={(e) => onMethodChange(e.target.value as ComplianceMethod)}>
-            <option value="non_rag">{formatMethodLabel("non_rag")}</option>
-            <option value="two_stage_rag">{formatMethodLabel("two_stage_rag")}</option>
-          </select>
-        </label>
-        <p className="empty-state">{methodHint}</p>
-        {method === "two_stage_rag" ? (
-          <div>
-            <h3>Reference files</h3>
-            {sortedDocuments.map((doc) => (
-              <div key={doc.stored_filename}>
-                <label className="check">
-                  <input
-                    type="checkbox"
-                    checked={selectedAdditionalDocuments.includes(doc.stored_filename)}
-                    onChange={(e) =>
-                      onSelectedAdditionalDocumentsChange(
-                        e.target.checked
-                          ? [...selectedAdditionalDocuments, doc.stored_filename]
-                          : selectedAdditionalDocuments.filter((item) => item !== doc.stored_filename),
-                      )
-                    }
-                  />
-                  <span className="document-option-copy">
-                    <span className="document-option-heading">
-                      <strong className="document-option-title">{doc.source_filename}</strong>
-                      <FrozenBadge document={doc} />
-                    </span>
-                    <span className="document-option-meta">
-                      {formatDocumentType(doc.document_type)} · {doc.group_id ?? "no-group"} · {formatLanguage(doc.language)}
-                      {" · "}Created: {formatDateTime(doc.created_at)}
-                      {extractionInfoByDocument[doc.stored_filename]
-                        ? ` · Extraction: ${extractionInfoByDocument[doc.stored_filename]?.provider} · ${extractionInfoByDocument[doc.stored_filename]?.model}`
-                        : ""}
-                    </span>
+        <p className="empty-state">
+          Uses extracted procedure deliverables, then a record-retrieval stage followed by a reference-informed upgrade stage.
+        </p>
+        <div>
+          <h3>Reference files</h3>
+          {sortedDocuments.map((doc) => (
+            <div key={doc.stored_filename}>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={selectedAdditionalDocuments.includes(doc.stored_filename)}
+                  onChange={(e) =>
+                    onSelectedAdditionalDocumentsChange(
+                      e.target.checked
+                        ? [...selectedAdditionalDocuments, doc.stored_filename]
+                        : selectedAdditionalDocuments.filter((item) => item !== doc.stored_filename),
+                    )
+                  }
+                />
+                <span className="document-option-copy">
+                  <span className="document-option-heading">
+                    <strong className="document-option-title">{doc.source_filename}</strong>
+                    <FrozenBadge document={doc} />
                   </span>
-                </label>
-              </div>
-            ))}
-            {sortedDocuments.length === 0 ? <p className="empty-state">No extra documents available.</p> : null}
-          </div>
-        ) : null}
+                  <span className="document-option-meta">
+                    {formatDocumentType(doc.document_type)} · {doc.group_id ?? "no-group"} · {formatLanguage(doc.language)}
+                    {" · "}Created: {formatDateTime(doc.created_at)}
+                    {extractionInfoByDocument[doc.stored_filename]
+                      ? ` · Extraction: ${extractionInfoByDocument[doc.stored_filename]?.provider} · ${extractionInfoByDocument[doc.stored_filename]?.model}`
+                      : ""}
+                  </span>
+                </span>
+              </label>
+            </div>
+          ))}
+          {sortedDocuments.length === 0 ? <p className="empty-state">No extra documents available.</p> : null}
+        </div>
         {readinessMessage ? <p className="empty-state">{readinessMessage}</p> : null}
         <label className="field">
           <span>Instructions</span>

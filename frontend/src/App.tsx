@@ -30,11 +30,10 @@ import { DocumentsPanel } from "./components/DocumentsPanel";
 import { FrozenBadge } from "./components/FrozenBadge";
 import { UploadPanel } from "./components/UploadPanel";
 import { formatMethodLabel } from "./utils/formatMethodLabel";
-import { formatOverallAssessment } from "./utils/formatOverallAssessment";
 import type {
   CaseRecord,
   CaseDocuments,
-  ComplianceMethod,
+  ComplianceRunMethod,
   ComplianceResponse,
   ComplianceSummary,
   DeliverableItem,
@@ -82,25 +81,24 @@ function renderLinkedRows(
         <td>None</td>
         <td>None</td>
         <td>None</td>
-        <td>None</td>
-        <td>None</td>
       </tr>
     `;
   }
 
   return rows.map((row, index) => {
-    const confidence = procedureToRecord?.[index]?.confidence;
-    const confidenceLabel = typeof confidence === "number"
-      ? `${(confidence * 100).toFixed(1)}%`
+    const evidenceStrength = procedureToRecord?.[index]?.evidence_strength;
+    const evidenceStrengthLabel = typeof evidenceStrength === "number"
+      ? `${(evidenceStrength * 100).toFixed(1)}%`
       : "&mdash;";
     return `
     <tr>
       <td>${index + 1}</td>
-      <td>${escapeHtml(row.requirement) || "&mdash;"}</td>
-      <td>${confidenceLabel}</td>
+      <td>
+        <div>${escapeHtml(row.requirement) || "&mdash;"}</div>
+        ${row.rationale ? `<div class="row-rationale">${escapeHtml(row.rationale)}</div>` : ""}
+      </td>
+      <td>${evidenceStrengthLabel}</td>
       <td>${escapeHtml(row.status) || "&mdash;"}</td>
-      <td>${escapeHtml(row.gap) || "&mdash;"}</td>
-      <td>${escapeHtml(row.recommendation) || "&mdash;"}</td>
     </tr>
   `;
   }).join("");
@@ -149,13 +147,12 @@ function getComplianceStages(compliance: ComplianceResponse) {
     return compliance.stages;
   }
   const fallbackStages = [];
-  if (compliance.baseline_analysis && compliance.baseline_scores) {
+  if (compliance.baseline_analysis) {
     fallbackStages.push({
       stage_key: "legacy_baseline",
       stage_label: formatMethodLabel(compliance.baseline_method ?? "non_rag"),
       method: compliance.baseline_method ?? "non_rag",
       analysis: compliance.baseline_analysis,
-      scores: compliance.baseline_scores,
       retrieval_metrics: compliance.baseline_retrieval_metrics ?? null,
     });
   }
@@ -164,7 +161,6 @@ function getComplianceStages(compliance: ComplianceResponse) {
     stage_label: formatMethodLabel(compliance.method),
     method: compliance.method,
     analysis: compliance.analysis,
-    scores: compliance.scores,
     retrieval_metrics: compliance.retrieval_metrics ?? null,
   });
   return fallbackStages;
@@ -184,17 +180,15 @@ function applyFrozenDeliverableConfidence(
 }
 
 function renderAssessmentBar({
-  overallAssessment,
-  scores,
+  analysis,
   retrievalMetrics,
   statusSummary,
 }: {
-  overallAssessment: string;
-  scores: ComplianceResponse["scores"];
+  analysis: ComplianceResponse["analysis"];
   retrievalMetrics?: ComplianceResponse["retrieval_metrics"] | ComplianceResponse["baseline_retrieval_metrics"] | null;
   statusSummary: Record<"satisfied" | "partial" | "not_satisfied", number>;
 }): string {
-  const completedPercent = Math.round(scores.m2_ordinal_score * 100);
+  const completedPercent = analysis.completion_percent;
   return `
     <div class="assessment">
       <span class="assessment-item assessment-item-edge-left">Completed <strong>${completedPercent}%</strong></span>
@@ -212,13 +206,13 @@ function renderAssessmentBar({
       </span>
     </div>
     <div class="assessment">
-      <span class="assessment-item">Evidence Support <strong>${scores.m3_evidence_weighted_score.toFixed(4)}</strong></span>
-      <span class="assessment-item">Grounding Quality <strong>${scores.m5_grounding_score.toFixed(4)}</strong></span>
+      <span class="assessment-item">Weighted Completion <strong>${analysis.weighted_completion_percent}%</strong></span>
+      <span class="assessment-item">Coverage <strong>${analysis.overall_coverage_percent}%</strong></span>
+      <span class="assessment-item">Weighted Coverage <strong>${analysis.weighted_coverage_percent}%</strong></span>
       ${(typeof retrievalMetrics?.record_k === "number"
         && typeof retrievalMetrics?.record_recall_at_k === "number")
         ? `<span class="assessment-item">Recall@${retrievalMetrics.record_k} <strong>${formatRecallMetric(retrievalMetrics.record_recall_at_k)}</strong></span>`
         : ""}
-      <span class="assessment-item assessment-item-edge-left">Label: <strong>${escapeHtml(formatOverallAssessment(overallAssessment))}</strong></span>
     </div>
   `;
 }
@@ -230,7 +224,7 @@ function renderEvidenceList(
     ? finding.evidence_items
     : finding.evidence.map((text) => ({
         text,
-        source_documents: finding.source_documents,
+        source_document: finding.source_document,
         stage_label: null,
       }));
 
@@ -246,58 +240,94 @@ function renderEvidenceList(
   `).join("");
 }
 
+function renderRequirementEvaluations(
+  analysis: ComplianceResponse["analysis"] | NonNullable<ComplianceResponse["stages"]>[number]["analysis"],
+  retrievalMetrics?: ComplianceResponse["retrieval_metrics"] | ComplianceResponse["baseline_retrieval_metrics"] | null,
+): string {
+  const findings = getAnalysisFindings(analysis);
+  return findings.map((finding, index) => {
+    const rowRecall = analysis.linked_rows?.[index]?.record_recall_at_k;
+    const recallLabel = typeof rowRecall === "number" && retrievalMetrics?.record_k
+      ? `Recall@${retrievalMetrics.record_k}: ${rowRecall.toFixed(1)} / 1.0`
+      : "";
+    return `
+      <article class="finding requirement-evaluation">
+        <header>
+          <div class="finding-title">
+            <div class="requirement-label">Requirement ${index + 1}</div>
+            <strong>${escapeHtml(finding.requirement)}</strong>
+          </div>
+          <div class="finding-header-meta">
+            <span class="status status-${escapeHtml(finding.status)}">${escapeHtml(finding.status)}</span>
+            ${recallLabel ? `<span class="finding-recall">${escapeHtml(recallLabel)}</span>` : ""}
+          </div>
+        </header>
+        <div class="finding-metrics">
+          <span><strong>Source:</strong> ${escapeHtml(finding.source_document || "none")}</span>
+          <span><strong>Evidence strength:</strong> ${(finding.evidence_strength * 100).toFixed(1)}% · <strong>Weight:</strong> ${finding.weight.toFixed(1)} · <strong>Coverage:</strong> ${finding.requirement_coverage_percent}%</span>
+        </div>
+        <ul>${renderEvidenceList(finding)}</ul>
+      </article>
+    `;
+  }).join("");
+}
+
+function renderStagePanel(
+  stage: NonNullable<ComplianceResponse["stages"]>[number] | {
+    stage_key: string;
+    stage_label: string;
+    method: string;
+    analysis: ComplianceResponse["analysis"];
+    retrieval_metrics?: ComplianceResponse["retrieval_metrics"] | ComplianceResponse["baseline_retrieval_metrics"] | null;
+  },
+): string {
+  const stageFindings = getAnalysisFindings(stage.analysis);
+  const stageStatusSummary = summarizeStatuses(stageFindings);
+  return `
+    <section class="stage-panel">
+      <h2 class="stage-panel-title">${escapeHtml(stage.stage_label)}</h2>
+      ${renderAssessmentBar({
+        analysis: stage.analysis,
+        retrievalMetrics: stage.retrieval_metrics,
+        statusSummary: stageStatusSummary,
+      })}
+      <details class="stage-panel-details">
+        <summary>Requirement details</summary>
+        <div class="stage-panel-body">
+          <div class="gap-table-wrap">
+            <table class="gap-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Requirement</th>
+                  <th>Evidence Strength</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>${renderLinkedRows(
+                stage.analysis.linked_rows ?? [],
+                stageFindings,
+              )}</tbody>
+            </table>
+          </div>
+          <section class="section-block">
+            <h3>Grounded Evidence (Procedure → Record)</h3>
+            <div class="findings">${renderRequirementEvaluations(stage.analysis, stage.retrieval_metrics)}</div>
+          </section>
+        </div>
+      </details>
+    </section>
+  `;
+}
+
 function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string): void {
   const popup = window.open("", "_blank", "width=1080,height=900");
   if (!popup) {
     throw new Error("Popup blocked");
   }
 
-  const procedureToRecord = getAnalysisFindings(compliance.analysis);
-  const statusSummary = summarizeStatuses(procedureToRecord);
   const stages = getComplianceStages(compliance);
-  const stageCards = stages.map((stage) => {
-    const stageFindings = getAnalysisFindings(stage.analysis);
-    const stageStatusSummary = summarizeStatuses(stageFindings);
-    return `
-      <div class="comparison-card">
-        <h2>${escapeHtml(stage.stage_label)}</h2>
-        ${renderAssessmentBar({
-          overallAssessment: stage.analysis.overall_assessment,
-          scores: stage.scores,
-          retrievalMetrics: stage.retrieval_metrics,
-          statusSummary: stageStatusSummary,
-        })}
-      </div>
-    `;
-  }).join("");
-
-  const requirementEvaluations = procedureToRecord.map((finding, index) => `
-    ${(() => {
-      const rowRecall = compliance.analysis.linked_rows?.[index]?.record_recall_at_k;
-      const recallLabel = typeof rowRecall === "number" && compliance.retrieval_metrics?.record_k
-        ? `Recall@${compliance.retrieval_metrics.record_k}: ${rowRecall.toFixed(1)} / 1.0`
-        : "";
-      return `
-    <article class="finding requirement-evaluation">
-      <header>
-        <div class="finding-title">
-          <div class="requirement-label">Requirement ${index + 1}</div>
-          <strong>${escapeHtml(finding.requirement)}</strong>
-        </div>
-        <div class="finding-header-meta">
-          <span class="status status-${escapeHtml(finding.status)}">${escapeHtml(finding.status)}</span>
-          ${recallLabel ? `<span class="finding-recall">${escapeHtml(recallLabel)}</span>` : ""}
-        </div>
-      </header>
-      <div class="finding-metrics">
-        <span><strong>Source:</strong> ${escapeHtml(finding.source_documents.join(", ") || "none")}</span>
-        <span><strong>Evidence strength:</strong> ${(finding.evidence_strength * 100).toFixed(1)}% · <strong>Weight:</strong> ${finding.weight.toFixed(1)}</span>
-      </div>
-      <ul>${renderEvidenceList(finding)}</ul>
-    </article>
-  `;
-    })()}
-  `).join("");
+  const stagePanels = stages.map((stage) => renderStagePanel(stage)).join("");
   popup.document.open();
   popup.document.write(`
     <!doctype html>
@@ -367,7 +397,7 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
             font-weight: 700;
           }
           .score-card span, .result-list li, .finding p, .finding li { color: #6f6252; }
-          .section-block { margin-top: 20px; }
+          .section-block { margin-top: 12px; }
           .gap-table-wrap {
             margin-top: 12px;
             overflow-x: auto;
@@ -394,6 +424,11 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
           }
           .gap-table td {
             color: #6f6252;
+          }
+          .row-rationale {
+            margin-top: 4px;
+            color: #6f6252;
+            font-size: 0.72rem;
           }
           .gap-table tr:last-child td {
             border-bottom: none;
@@ -446,20 +481,33 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
             text-transform: uppercase;
             letter-spacing: 0.03em;
           }
-          .comparison-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-            gap: 16px;
-            margin-top: 20px;
-          }
-          .comparison-card {
-            padding: 10px;
+          .stage-panel {
             border: 1px solid #d8c8a8;
             border-radius: 7px;
             background: rgba(255,255,255,0.72);
+            padding: 10px 12px 12px;
           }
-          .comparison-card h2 {
-            margin-bottom: 8px;
+          .stage-panel + .stage-panel {
+            margin-top: 10px;
+          }
+          .stage-panel-title {
+            margin-bottom: 10px;
+            color: #5a3a16;
+          }
+          .stage-panel-details {
+            margin-top: 10px;
+          }
+          .stage-panel-details summary {
+            cursor: pointer;
+            color: #5a3a16;
+            font-weight: 700;
+            list-style: none;
+          }
+          .stage-panel-details summary::-webkit-details-marker {
+            display: none;
+          }
+          .stage-panel-body {
+            padding-top: 10px;
           }
           .status { border-radius: 4px; padding: 2px 7px; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
           .status-satisfied { background: #d7f1df; color: #2d6a4f; }
@@ -478,7 +526,6 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
               justify-content: flex-start;
             }
             .finding-metrics { grid-template-columns: 1fr; }
-            .comparison-grid { grid-template-columns: 1fr; }
           }
         </style>
       </head>
@@ -493,45 +540,7 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
               <p>Created: ${escapeHtml(formatDateTime(compliance.created_at))}</p>
             </div>
           </div>
-          <section class="section-block">
-            <h2>${escapeHtml(compliance.method === "two_stage_rag" ? "Stage Progression" : "Final Assessment")}</h2>
-            <div class="comparison-grid">
-              ${compliance.method === "two_stage_rag"
-                ? stageCards
-                : `
-              <div class="comparison-card">
-                <h2>${escapeHtml(formatMethodLabel(compliance.method))}</h2>
-                ${renderAssessmentBar({
-                  overallAssessment: compliance.analysis.overall_assessment,
-                  scores: compliance.scores,
-                  retrievalMetrics: compliance.retrieval_metrics,
-                  statusSummary,
-                })}
-              </div>`}
-            </div>
-          </section>
-          <div class="gap-table-wrap">
-            <table class="gap-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Requirement</th>
-                  <th>Confidence</th>
-                  <th>Status</th>
-                  <th>Gap</th>
-                  <th>Recommendation</th>
-                </tr>
-              </thead>
-              <tbody>${renderLinkedRows(
-                compliance.analysis.linked_rows ?? [],
-                procedureToRecord,
-              )}</tbody>
-            </table>
-          </div>
-          <section class="section-block">
-            <h2>Grounded Evidence (Procedure → Record)</h2>
-            <div class="findings">${requirementEvaluations}</div>
-          </section>
+          <section>${stagePanels}</section>
         </div>
       </body>
     </html>
@@ -561,7 +570,7 @@ export default function App() {
   const [providers, setProviders] = useState<LLMProviderDescriptor[]>(FALLBACK_LLM_PROVIDERS);
   const [provider, setProvider] = useState(FALLBACK_LLM_PROVIDERS[0]?.key ?? "openai");
   const [model, setModel] = useState(FALLBACK_LLM_PROVIDERS[0]?.default_model ?? "gpt-5.4-nano");
-  const [complianceMethod, setComplianceMethod] = useState<ComplianceMethod>("non_rag");
+  const complianceMethod: ComplianceRunMethod = "two_stage_rag";
   const [instructions, setInstructions] = useState("");
   const [selectedCaseId, setSelectedCaseId] = useState("");
   const [selectedAdditionalComplianceDocuments, setSelectedAdditionalComplianceDocuments] = useState<string[]>([]);
@@ -596,12 +605,6 @@ export default function App() {
   useEffect(() => {
     void refreshProviders();
   }, []);
-
-  useEffect(() => {
-    if (complianceMethod !== "two_stage_rag" && selectedAdditionalComplianceDocuments.length > 0) {
-      setSelectedAdditionalComplianceDocuments([]);
-    }
-  }, [complianceMethod, selectedAdditionalComplianceDocuments.length]);
 
   useEffect(() => {
     setSelectedAdditionalComplianceDocuments([]);
@@ -712,8 +715,11 @@ export default function App() {
     }
 
     if (!fileName && caseDocuments?.case_id === caseId) {
-      setOpenComplianceDocumentsFile("");
-      setCaseDocuments(null);
+      if (openComplianceDocumentsFile) {
+        setOpenComplianceDocumentsFile("");
+      } else {
+        setCaseDocuments(null);
+      }
       return;
     }
 
@@ -922,15 +928,10 @@ export default function App() {
       });
       setEditableDeliverables(normalizedDeliverables);
       const documentKey = result.source_filename ?? storedFilename;
-      setSelectedDeliverablesByDocument((current) => {
-        if (current[documentKey]) {
-          return current;
-        }
-        return {
-          ...current,
-          [documentKey]: result.deliverables.map((item) => item.requirement_text),
-        };
-      });
+      setSelectedDeliverablesByDocument((current) => ({
+        ...current,
+        [documentKey]: result.deliverables.map((item) => item.requirement_text),
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Loading deliverables failed");
     } finally {
@@ -1271,15 +1272,12 @@ export default function App() {
         return (
           <CasesPanel
             cases={cases}
-            documents={documents}
             selectedCaseId={selectedCaseId}
             caseDocuments={caseDocuments}
+            openDocumentsFile={openComplianceDocumentsFile}
             extractionInfoByDocument={extractionInfoByDocument}
             busy={busy}
             onShowDocuments={(caseId) => void onShowCaseDocuments(caseId)}
-            onUpdateCaseRecords={(caseId, recordStoredFilenames) =>
-              void onUpdateCaseRecords(caseId, recordStoredFilenames)
-            }
             onDeleteCase={(caseId) => void onDeleteCase(caseId)}
           />
         );
@@ -1293,7 +1291,6 @@ export default function App() {
             selectedCaseId={selectedCaseId}
             provider={provider}
             model={model}
-            method={complianceMethod}
             instructions={instructions}
             selectedAdditionalDocuments={selectedAdditionalComplianceDocuments}
             busy={busy}
@@ -1301,7 +1298,6 @@ export default function App() {
             onSelectCase={setSelectedCaseId}
             onProviderChange={onComplianceProviderChange}
             onModelChange={setModel}
-            onMethodChange={setComplianceMethod}
             onInstructionsChange={setInstructions}
             onSelectedAdditionalDocumentsChange={setSelectedAdditionalComplianceDocuments}
           />

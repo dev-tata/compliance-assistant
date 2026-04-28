@@ -4,6 +4,7 @@ from typing import Any
 
 from app.schemas.compliance import ComplianceAnalysis, ComplianceRequest
 from app.services.compliance_methods.compliance_method_common import (
+    annotate_deliverable_structure,
     build_compliance_prompt,
     extract_allowed_record_documents,
     execute_compliance_method,
@@ -35,7 +36,7 @@ def _build_non_rag_case_context(case_payload: dict[str, Any]) -> dict[str, Any]:
         "case_id": case_payload.get("case_id"),
         "title": case_payload.get("title"),
         "notes": case_payload.get("notes"),
-        "deliverables": case_payload.get("deliverables", []),
+        "deliverables": annotate_deliverable_structure(case_payload.get("deliverables", [])),
         "records": [
             simplify_document_for_prompt(document) for document in case_payload.get("records", [])
         ],

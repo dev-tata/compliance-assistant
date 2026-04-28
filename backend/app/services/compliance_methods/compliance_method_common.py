@@ -18,7 +18,7 @@ from app.schemas.compliance import (
     ComplianceRequest,
     ComplianceResponse,
 )
-from app.services.compliance_scoring_service import compute_scores, enrich_analysis_for_scoring
+from app.services.compliance_scoring_service import enrich_analysis_for_scoring
 from app.services.document_service import current_timestamp
 from app.services.llm.errors import LLMGenerationError
 from app.services.llm.factory import get_llm_service
@@ -27,9 +27,14 @@ from app.services.retrieval.faiss_retrieval import normalize_whitespace
 from app.services.storage_paths import get_case_compliance_dir
 
 PROMPT_FAMILY = "canonical_compliance_v2_relaxed"
+MIN_SATISFIED_EVIDENCE_ITEMS = 1
+MIN_SATISFIED_SOURCE_DOCUMENTS = 1
+MIN_STRONG_CLAIM_EVIDENCE_ITEMS = 2
+MIN_SUBSTANTIVE_SECTION_TEXT_LENGTH = 40
+MIN_SUBSTANTIVE_SECTION_TOKEN_COUNT = 6
 STATUS_COMPLETION_SCORES = {
     "satisfied": 100,
-    "partial": 50,
+    "partial": 33,
     "not_satisfied": 0,
 }
 
@@ -44,19 +49,24 @@ def execute_compliance_method(
 ) -> ComplianceResponse:
     llm_service = get_llm_service(request.provider, request.model)
     allowed_record_documents = extract_allowed_record_documents(case_payload)
+    deliverables = annotate_deliverable_structure(
+        list(case_payload.get("deliverables", [])) if isinstance(case_payload, dict) else []
+    )
     analysis = parse_compliance_analysis_response(
         raw_analysis=llm_service.generate(prompt, temperature=0.0),
         method=method,
-        expected_count=len(case_payload.get("deliverables", [])) if isinstance(case_payload, dict) else 0,
+        expected_count=len(deliverables),
         allowed_record_documents=allowed_record_documents,
     )
     analysis = enrich_analysis_for_scoring(
         analysis,
         requirement_weights=_extract_deliverable_weights(case_payload),
+        deliverable_metadata=deliverables,
     )
-    analysis = apply_computed_overall_assessment(analysis)
-    scores = compute_scores(analysis)
-
+    analysis = assemble_compliance_analysis(
+        findings=analysis.procedure_to_record or analysis.findings,
+        linked_rows=analysis.linked_rows,
+    )
     saved_path = build_compliance_result_path(case_id)
     created_at = current_timestamp()
     response = ComplianceResponse(
@@ -74,7 +84,6 @@ def execute_compliance_method(
         created_at=created_at,
         saved_at=saved_path.as_posix(),
         analysis=analysis,
-        scores=scores,
         section_matches=[],
     )
     saved_path.write_text(
@@ -108,18 +117,12 @@ def _extract_deliverable_weights(case_payload: dict[str, object]) -> list[float]
 def build_shared_output_instructions(
     *,
     single_requirement: bool = False,
-    include_feedback: bool = True,
+    include_feedback: bool = False,
 ) -> list[str]:
     output_structure = [
         "{",
-        '"overall_assessment":"computed_by_backend",',
-        (
-            '"linked_rows":[{"requirement_ref":"REQ-1","status":"satisfied|partial|not_satisfied","gap":"...","recommendation":"..."}],'
-            if include_feedback
-            else '"linked_rows":[{"requirement_ref":"REQ-1","status":"satisfied|partial|not_satisfied","gap":"","recommendation":""}],'
-        ),
-        '"procedure_to_record":[{"requirement":"...","status":"satisfied|partial|not_satisfied","evidence":["verbatim or near-verbatim short quotes"],"source_documents":["record-file-name"]}],',
-        ('"recommended_actions":["..."]' if include_feedback else '"recommended_actions":[]'),
+        '"linked_rows":[{"requirement_ref":"REQ-1","rationale":"short traceability rationale"}],',
+        '"procedure_to_record":[{"requirement":"...","evidence":["verbatim or near-verbatim short quotes"],"source_document":"record-file-name"}]',
         "}",
     ]
     return [
@@ -133,29 +136,24 @@ def build_shared_output_instructions(
         "- Provide evidence as short quote-based plain text grounded in admissible record evidence.",
         "- Do not use evidence fields for commentary, absence statements, reasoning, conclusions, or recommendations.",
         "- Do not invent requirements, evidence, sections, systems, roles, or context.",
-        "Status definitions:",
-        "- satisfied: all required elements are supported by admissible record evidence, either explicitly or through clear equivalent structured evidence.",
-        "- partial: the record substantially addresses the requirement, but at least one material element is missing, unclear, weakly supported, or only indirectly shown.",
-        "- not_satisfied: required support is absent, clearly contradictory, too weak to rely on, or not admissible for this method.",
-        "Predicate-level decision logic:",
+        "Assessment guidance:",
         "- Break each requirement into the concrete elements it requires.",
         "- Check each element against admissible evidence only.",
-        "- If all elements are supported, return satisfied.",
-        "- If some elements are supported but one or more are missing, return partial.",
-        "- Prefer substance over exact wording. Equivalent wording, structured tables, summaries, and conclusions may satisfy a requirement if they clearly establish the required point.",
+        "- The backend will derive compliance status from the grounded evidence you return.",
+        "- Your job is to return only grounded evidence, the source document, and a short rationale describing how well the record supports the requirement.",
+        "- Prefer substance over exact wording, but require the record evidence to establish the required point clearly. Treat equivalent wording or structured evidence conservatively unless it directly covers the required element.",
         "- Do not require a specific record layout, heading name, table shape, or wording pattern unless the requirement explicitly requires it.",
         "- Do not penalize a record merely because evidence appears in a different section, format, or phrasing than the procedure text.",
-        "- If support is ambiguous, incomplete, or indirect but still meaningful, prefer partial over not_satisfied.",
-        "- Use not_satisfied only when the requirement is truly unsupported, contradicted, or too weak to rely on.",
-        "- If support is indirect but still admissible and sufficient to establish the required element, you may treat it as satisfied or partial depending on completeness.",
+        "- A matching heading, title, or section number alone is never sufficient evidence. Use the section body text or table content, not structure alone, to justify compliance.",
+        "- Be careful with indirect or summarized support. Do not treat indirect or inferred support as satisfied unless it clearly establishes the required element.",
+        "- If a deliverable indicates broader subsection coverage expectations, use satisfied only when the evidence spans enough distinct relevant subsection areas rather than one local mention.",
         "- Reference context may clarify requirement meaning, but it does not create additional required fields or record structure beyond the requirement itself.",
         "- For conditional requirements such as 'where necessary' or 'in cases where', first assess whether the triggering condition is evidenced in the admissible record.",
-        "- If the trigger is not evidenced, do not assume the condition occurred. Prefer satisfied when the record supports non-applicability, otherwise prefer partial rather than not_satisfied.",
-        "- For near-complete records, small wording gaps should usually result in partial rather than not_satisfied when the intended control, decision, or output is otherwise demonstrated.",
+        "- If the trigger is not evidenced, do not assume the condition occurred.",
+        "- For near-complete records, do not ignore missing material elements. If a material required point is not evidenced, the rationale should make that clear.",
         "Output requirements:",
         "- Return one JSON object only.",
         "- Do not return markdown or code fences.",
-        "- The backend computes overall_assessment and completion_percent. Set overall_assessment to computed_by_backend.",
         (
             "- Include exactly one procedure_to_record item and one linked_rows item for the single input requirement."
             if single_requirement
@@ -171,18 +169,9 @@ def build_shared_output_instructions(
             if single_requirement
             else "- Use requirement_ref values REQ-1, REQ-2, and so on, matching the input order."
         ),
-        "- Every procedure_to_record item and linked_rows item must use one of these status values only: satisfied, partial, not_satisfied.",
-        "- Every procedure_to_record.source_documents item must refer only to record document filenames from this case.",
-        (
-            "- For satisfied items, linked_rows.gap and linked_rows.recommendation may be empty."
-            if include_feedback
-            else "- Set linked_rows.gap and linked_rows.recommendation to empty strings for every requirement."
-        ),
-        (
-            "- For partial and not_satisfied items, gap must briefly state the missing point and recommendation must briefly state the corrective action."
-            if include_feedback
-            else "- Do not generate gaps or recommendations in this stage. Keep recommended_actions empty."
-        ),
+        "- Every procedure_to_record.source_document value must refer only to a record document filename from this case.",
+        "- For every requirement, set linked_rows.rationale to one short plain-text sentence grounded in the admissible record evidence.",
+        "- Do not generate status, gaps, recommendations, or recommended_actions.",
         "- Do not include findings in the model output. The backend will derive findings from procedure_to_record.",
         "Return JSON with exactly this structure:",
         *output_structure,
@@ -209,8 +198,8 @@ def build_method_specific_constraints(method: ComplianceMethod | str) -> list[st
         *shared,
         "- Use ONLY retrieved_record_sections as admissible compliance evidence.",
         "- Use retrieved_requirement_context only to interpret the meaning of a requirement.",
-        "- Never use retrieved_requirement_context as compliance evidence and never cite reference documents in source_documents.",
-        "- Treat the single-source baseline as the minimum acceptable result. You may keep it or improve it, but do not downgrade it unless the backend explicitly allows that behavior.",
+        "- Never use retrieved_requirement_context as compliance evidence and never cite reference documents in source_document.",
+        "- Evaluate each requirement from scratch using the provided deliverable, retrieved_record_sections, and retrieved_requirement_context.",
         "- Do not rely on any full record document outside retrieved_record_sections.",
         "- If a claim is supported only outside retrieved_record_sections, treat it as not admissible and return partial or not_satisfied accordingly.",
     ]
@@ -222,7 +211,7 @@ def build_compliance_prompt(
     payload: dict[str, Any],
     instructions: str | None,
     single_requirement: bool = False,
-    include_feedback: bool = True,
+    include_feedback: bool = False,
 ) -> str:
     prompt_parts = [
         *build_shared_output_instructions(
@@ -248,7 +237,7 @@ def serialize_baseline_analysis(analysis: ComplianceAnalysis) -> list[dict[str, 
             "requirement": finding.requirement,
             "status": finding.status,
             "evidence": finding.evidence,
-            "source_documents": finding.source_documents,
+            "source_document": finding.source_document,
         }
         for index, finding in enumerate(findings)
     ]
@@ -322,8 +311,46 @@ def serialize_deliverable_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
         "requirement_text": item.get("requirement_text"),
         "source_quote": item.get("source_quote"),
         "weight": item.get("weight"),
+        "expected_evidence_breadth": item.get("expected_evidence_breadth"),
         "retrieval_score": item.get("retrieval_score"),
     }
+
+
+def annotate_deliverable_structure(deliverables: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = [dict(item) for item in deliverables]
+    section_labels = [
+        normalize_whitespace(item.get("section_label"))
+        for item in normalized
+        if normalize_whitespace(item.get("section_label"))
+    ]
+
+    annotated: list[dict[str, Any]] = []
+    for item in normalized:
+        section_label = normalize_whitespace(item.get("section_label"))
+        descendants = _count_descendant_sections(section_label, section_labels)
+        expected_breadth = min(3, max(1, descendants if descendants else 1))
+        annotated.append(
+            {
+                **item,
+                "expected_evidence_breadth": expected_breadth,
+            }
+        )
+    return annotated
+
+
+def _count_descendant_sections(section_label: str, section_labels: list[str]) -> int:
+    if not section_label:
+        return 0
+    descendants: set[str] = set()
+    prefix = f"{section_label}."
+    for candidate in section_labels:
+        if not candidate.startswith(prefix):
+            continue
+        suffix = candidate[len(prefix):]
+        immediate = suffix.split(".", 1)[0].strip()
+        if immediate:
+            descendants.add(immediate)
+    return len(descendants)
 
 
 def build_single_requirement_prompt(
@@ -331,7 +358,7 @@ def build_single_requirement_prompt(
     method: ComplianceMethod | str,
     requirement_payload: dict[str, Any],
     instructions: str | None,
-    include_feedback: bool = True,
+    include_feedback: bool = False,
 ) -> str:
     return build_compliance_prompt(
         method=method,
@@ -376,7 +403,7 @@ def normalize_compliance_analysis(
     if analysis.procedure_to_record and not analysis.findings:
         analysis = analysis.model_copy(update={"findings": analysis.procedure_to_record})
     if allowed_record_documents is not None:
-        analysis = _normalize_analysis_source_documents(
+        analysis = _normalize_analysis_source_document(
             analysis=analysis,
             allowed_record_documents=allowed_record_documents,
         )
@@ -403,7 +430,7 @@ def evaluate_single_requirement(
     requirement_payload: dict[str, Any],
     instructions: str | None,
     temperature: float = 0.0,
-    include_feedback: bool = True,
+    include_feedback: bool = False,
 ) -> ComplianceAnalysis:
     prompt = build_single_requirement_prompt(
         method=method,
@@ -427,8 +454,8 @@ def normalize_requirement_finding(
     normalized_evidence = normalize_string_list(finding.evidence)
     normalized = finding.model_copy(
         update={
-            "source_documents": sanitize_source_documents(
-                finding.source_documents,
+            "source_document": sanitize_source_document(
+                finding.source_document,
                 allowed=allowed_record_documents,
                 fallback=[item.get("source_document") for item in retrieved_record_sections],
             ),
@@ -436,8 +463,8 @@ def normalize_requirement_finding(
             "evidence_items": [
                 ComplianceEvidenceItem(
                     text=evidence,
-                    source_documents=sanitize_source_documents(
-                        finding.source_documents,
+                    source_document=sanitize_source_document(
+                        finding.source_document,
                         allowed=allowed_record_documents,
                         fallback=[item.get("source_document") for item in retrieved_record_sections],
                     ),
@@ -461,16 +488,9 @@ def normalize_requirement_linked_row(
         requirement_ref=row.requirement_ref if row and row.requirement_ref else "",
         requirement=row.requirement if row and row.requirement else finding.requirement,
         status=finding.status,
-        gap="" if finding.status == "satisfied" else (row.gap if row and row.gap else finding.requirement),
-        recommendation=(
-            ""
-            if finding.status == "satisfied"
-            else (
-                sanitize_compliance_recommendation(row.recommendation)
-                if row and row.recommendation
-                else recommended_action_for_requirement(finding.requirement)
-            )
-        ),
+        rationale=row.rationale if row and row.rationale else "",
+        gap="" if finding.status == "satisfied" else finding.requirement,
+        recommendation="" if finding.status == "satisfied" else recommended_action_for_requirement(finding.requirement),
     )
 
 
@@ -481,36 +501,52 @@ def compute_completion_percent(findings: list[ComplianceFinding]) -> int:
     return round(total_score / len(findings))
 
 
-def compute_overall_assessment_from_findings(findings: list[ComplianceFinding]) -> str:
-    completion_percent = compute_completion_percent(findings)
-    if completion_percent <= 10:
-        return "Completed_0_10"
-    if completion_percent <= 20:
-        return "Completed_11_20"
-    if completion_percent <= 30:
-        return "Completed_21_30"
-    if completion_percent <= 40:
-        return "Completed_31_40"
-    if completion_percent <= 50:
-        return "Completed_41_50"
-    if completion_percent <= 60:
-        return "Completed_51_60"
-    if completion_percent <= 70:
-        return "Completed_61_70"
-    if completion_percent <= 80:
-        return "Completed_71_80"
-    if completion_percent <= 90:
-        return "Completed_81_90"
-    return "Completed_91_100"
+def compute_weighted_completion_percent(findings: list[ComplianceFinding]) -> int:
+    if not findings:
+        return 0
+    total_weight = sum(float(finding.weight or 0.0) for finding in findings)
+    if total_weight <= 0:
+        return compute_completion_percent(findings)
+    total_score = sum(
+        STATUS_COMPLETION_SCORES.get(finding.status, 0) * float(finding.weight or 0.0)
+        for finding in findings
+    )
+    return round(total_score / total_weight)
 
 
-def apply_computed_overall_assessment(analysis: ComplianceAnalysis) -> ComplianceAnalysis:
+def compute_overall_coverage_percent(findings: list[ComplianceFinding]) -> int:
+    if not findings:
+        return 0
+    return round(
+        sum(int(finding.requirement_coverage_percent or 0) for finding in findings) / len(findings)
+    )
+
+
+def compute_weighted_coverage_percent(findings: list[ComplianceFinding]) -> int:
+    if not findings:
+        return 0
+    total_weight = sum(float(finding.weight or 0.0) for finding in findings)
+    if total_weight <= 0:
+        return compute_overall_coverage_percent(findings)
+    total_score = sum(
+        int(finding.requirement_coverage_percent or 0) * float(finding.weight or 0.0)
+        for finding in findings
+    )
+    return round(total_score / total_weight)
+
+
+def apply_computed_analysis_metrics(analysis: ComplianceAnalysis) -> ComplianceAnalysis:
     findings = analysis.procedure_to_record or analysis.findings
     completion_percent = compute_completion_percent(findings)
+    weighted_completion_percent = compute_weighted_completion_percent(findings)
+    overall_coverage_percent = compute_overall_coverage_percent(findings)
+    weighted_coverage_percent = compute_weighted_coverage_percent(findings)
     return analysis.model_copy(
         update={
-            "overall_assessment": compute_overall_assessment_from_findings(findings),
             "completion_percent": completion_percent,
+            "weighted_completion_percent": weighted_completion_percent,
+            "overall_coverage_percent": overall_coverage_percent,
+            "weighted_coverage_percent": weighted_coverage_percent,
         }
     )
 
@@ -528,6 +564,7 @@ def build_linked_rows_from_findings(
                 requirement_ref=f"REQ-{index + 1}",
                 requirement=(existing_row.requirement if existing_row and existing_row.requirement else finding.requirement),
                 status=finding.status,
+                rationale=(existing_row.rationale if existing_row and existing_row.rationale else ""),
                 record_recall_at_k=(existing_row.record_recall_at_k if existing_row else None),
                 gap=(
                     ""
@@ -559,8 +596,10 @@ def assemble_compliance_analysis(
 ) -> ComplianceAnalysis:
     resolved_rows = build_linked_rows_from_findings(findings, existing_rows=linked_rows)
     analysis = ComplianceAnalysis(
-        overall_assessment="computed_by_backend",
         completion_percent=0,
+        weighted_completion_percent=0,
+        overall_coverage_percent=0,
+        weighted_coverage_percent=0,
         linked_rows=resolved_rows,
         findings=findings,
         procedure_to_record=findings,
@@ -571,7 +610,7 @@ def assemble_compliance_analysis(
             if row.status != "satisfied" and row.recommendation
         ],
     )
-    return apply_computed_overall_assessment(analysis)
+    return apply_computed_analysis_metrics(analysis)
 
 
 def recommended_action_for_requirement(requirement: str) -> str:
@@ -616,26 +655,28 @@ def verify_finding_against_retrieved_sections(
     finding: ComplianceFinding,
     retrieved_sections: list[dict[str, Any]],
 ) -> ComplianceFinding:
-    supported_evidence = [
-        evidence
-        for evidence in finding.evidence
-        if evidence_supported_by_sections(evidence, retrieved_sections)
-    ]
-    next_status = finding.status
-    next_sources = list(finding.source_documents)
+    supported_evidence, evidence_breadth = _collect_supported_evidence(
+        evidence_list=finding.evidence,
+        sections=retrieved_sections,
+    )
+    next_source = finding.source_document
     if not supported_evidence:
-        next_sources = []
-        if finding.status == "satisfied":
-            next_status = "partial"
-        elif finding.status == "partial":
-            next_status = "not_satisfied"
-    return finding.model_copy(
+        next_source = ""
+    verified = finding.model_copy(
         update={
-            "status": next_status,
             "evidence": supported_evidence,
-            "source_documents": next_sources,
+            "source_document": next_source,
+            "evidence_breadth": evidence_breadth,
+            "evidence_items": [
+                ComplianceEvidenceItem(
+                    text=evidence,
+                    source_document=next_source,
+                )
+                for evidence in supported_evidence
+            ],
         }
     )
+    return _apply_evidence_thresholds(verified)
 
 
 def verify_finding_against_full_record_sections(
@@ -643,56 +684,73 @@ def verify_finding_against_full_record_sections(
     finding: ComplianceFinding,
     record_sections: list[dict[str, Any]],
 ) -> ComplianceFinding:
-    supported_evidence = [
-        evidence
-        for evidence in finding.evidence
-        if evidence_supported_by_sections(evidence, record_sections)
-    ]
-    next_status = finding.status
-    next_sources = list(finding.source_documents)
+    supported_evidence, evidence_breadth = _collect_supported_evidence(
+        evidence_list=finding.evidence,
+        sections=record_sections,
+    )
+    next_source = finding.source_document
     if not supported_evidence:
-        next_sources = []
-        if finding.status == "satisfied":
-            next_status = "partial"
-        elif finding.status == "partial":
-            next_status = "not_satisfied"
-    return finding.model_copy(
+        next_source = ""
+    verified = finding.model_copy(
         update={
-            "status": next_status,
             "evidence": supported_evidence,
-            "source_documents": next_sources,
+            "source_document": next_source,
+            "evidence_breadth": evidence_breadth,
             "evidence_items": [
                 ComplianceEvidenceItem(
                     text=evidence,
-                    source_documents=next_sources,
+                    source_document=next_source,
                 )
                 for evidence in supported_evidence
             ],
         }
     )
+    return _apply_evidence_thresholds(verified)
 
 
 def evidence_supported_by_sections(evidence: str, sections: list[dict[str, Any]]) -> bool:
+    return bool(_matching_sections_for_evidence(evidence, sections))
+
+
+def _collect_supported_evidence(
+    *,
+    evidence_list: list[str],
+    sections: list[dict[str, Any]],
+) -> tuple[list[str], int]:
+    supported_evidence: list[str] = []
+    section_keys: set[str] = set()
+    for evidence in evidence_list:
+        matches = _matching_sections_for_evidence(evidence, sections)
+        if not matches:
+            continue
+        supported_evidence.append(evidence)
+        section_keys.update(_section_support_key(section) for section in matches)
+    section_keys.discard("")
+    return supported_evidence, len(section_keys)
+
+
+def _matching_sections_for_evidence(evidence: str, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized_evidence = normalize_whitespace(evidence).lower()
     if not normalized_evidence:
-        return False
-    section_text = " ".join(
-        normalize_whitespace(
-            " ".join(part for part in (section.get("text"), section.get("table_markdown")) if part)
-        ).lower()
-        for section in sections
-    )
-    if not section_text:
-        return False
-    if normalized_evidence in section_text:
-        return True
+        return []
     evidence_tokens = re.findall(r"[a-z0-9]+", normalized_evidence)
     if not evidence_tokens:
-        return False
-    section_tokens = set(re.findall(r"[a-z0-9]+", section_text))
-    overlap = sum(1 for token in evidence_tokens if token in section_tokens)
-    min_overlap = min(len(evidence_tokens), 4)
-    return overlap >= min_overlap and (overlap / len(evidence_tokens)) >= 0.7
+        return []
+
+    matches: list[dict[str, Any]] = []
+    for section in sections:
+        section_text = _substantive_section_text(section)
+        if not section_text:
+            continue
+        if normalized_evidence in section_text:
+            matches.append(section)
+            continue
+        section_tokens = set(re.findall(r"[a-z0-9]+", section_text))
+        overlap = sum(1 for token in evidence_tokens if token in section_tokens)
+        min_overlap = min(len(evidence_tokens), 4)
+        if overlap >= min_overlap and (overlap / len(evidence_tokens)) >= 0.7:
+            matches.append(section)
+    return matches
 
 
 def normalize_string_list(value: Any) -> list[str]:
@@ -704,22 +762,49 @@ def normalize_string_list(value: Any) -> list[str]:
     return [normalize_whitespace(str(item)) for item in value if normalize_whitespace(str(item))]
 
 
-def sanitize_source_documents(
+def _substantive_section_text(section: dict[str, Any]) -> str:
+    body_text = normalize_whitespace(section.get("text") or "")
+    table_text = normalize_whitespace(section.get("table_markdown") or "")
+    if table_text:
+        return normalize_whitespace(" ".join(part for part in (body_text, table_text) if part)).lower()
+    if not body_text:
+        return ""
+    body_tokens = re.findall(r"[a-z0-9]+", body_text.lower())
+    if (
+        len(body_text) < MIN_SUBSTANTIVE_SECTION_TEXT_LENGTH
+        and len(body_tokens) < MIN_SUBSTANTIVE_SECTION_TOKEN_COUNT
+    ):
+        return ""
+    return body_text.lower()
+
+
+def _section_support_key(section: dict[str, Any]) -> str:
+    source_document = normalize_whitespace(section.get("source_document") or "")
+    section_label = normalize_whitespace(section.get("section_label") or "")
+    heading_title = normalize_whitespace(section.get("heading_title") or "")
+    for value in (section_label, heading_title):
+        if value:
+            return f"{source_document}::{value}" if source_document else value
+    return source_document
+
+
+def sanitize_source_document(
     value: Any,
     *,
     allowed: set[str],
     fallback: list[Any],
-) -> list[str]:
+) -> str:
     requested = normalize_string_list(value)
     sanitized = [item for item in requested if item in allowed]
     if sanitized:
-        return sanitized
+        return sanitized[0]
     fallback_sanitized = [
         normalize_whitespace(str(item))
         for item in fallback
         if normalize_whitespace(str(item)) in allowed
     ]
-    return list(dict.fromkeys(fallback_sanitized))
+    deduped = list(dict.fromkeys(fallback_sanitized))
+    return deduped[0] if deduped else ""
 
 
 def sanitize_compliance_recommendation(value: str) -> str:
@@ -739,20 +824,20 @@ def sanitize_compliance_recommendation(value: str) -> str:
     return sanitized
 
 
-def _normalize_analysis_source_documents(
+def _normalize_analysis_source_document(
     *,
     analysis: ComplianceAnalysis,
     allowed_record_documents: set[str],
 ) -> ComplianceAnalysis:
     normalized_procedure_to_record = [
-        _normalize_finding_source_documents(
+        _normalize_finding_source_document(
             finding=finding,
             allowed_record_documents=allowed_record_documents,
         )
         for finding in analysis.procedure_to_record
     ]
     normalized_findings = [
-        _normalize_finding_source_documents(
+        _normalize_finding_source_document(
             finding=finding,
             allowed_record_documents=allowed_record_documents,
         )
@@ -766,29 +851,117 @@ def _normalize_analysis_source_documents(
     )
 
 
-def _normalize_finding_source_documents(
+def _normalize_finding_source_document(
     *,
     finding: ComplianceFinding,
     allowed_record_documents: set[str],
 ) -> ComplianceFinding:
     normalized_evidence = normalize_string_list(finding.evidence)
     if not normalized_evidence:
-        return finding.model_copy(
+        normalized = finding.model_copy(
             update={
                 "evidence": [],
-                "source_documents": [],
+                "source_document": "",
+                "evidence_items": [],
             }
         )
-    return finding.model_copy(
+        return _apply_evidence_thresholds(normalized)
+    normalized = finding.model_copy(
         update={
             "evidence": normalized_evidence,
-            "source_documents": sanitize_source_documents(
-                finding.source_documents,
+            "source_document": sanitize_source_document(
+                finding.source_document,
                 allowed=allowed_record_documents,
                 fallback=[],
             ),
+            "evidence_items": [
+                ComplianceEvidenceItem(
+                    text=evidence,
+                    source_document=sanitize_source_document(
+                        finding.source_document,
+                        allowed=allowed_record_documents,
+                        fallback=[],
+                    ),
+                )
+                for evidence in normalized_evidence
+            ],
         }
     )
+    return _apply_evidence_thresholds(normalized)
+
+
+def _apply_evidence_thresholds(finding: ComplianceFinding) -> ComplianceFinding:
+    evidence = normalize_string_list(finding.evidence)
+    source_document = normalize_whitespace(finding.source_document)
+    evidence_items = (
+        [
+            item
+            for item in finding.evidence_items
+            if normalize_whitespace(item.text)
+        ]
+        if finding.evidence_items
+        else [
+            ComplianceEvidenceItem(
+                text=text,
+                source_document=source_document,
+            )
+            for text in evidence
+        ]
+    )
+    grounded_count = sum(
+        1
+        for item in evidence_items
+        if normalize_whitespace(item.text) and normalize_whitespace(item.source_document)
+    )
+
+    next_status = _derive_status_from_grounded_evidence(
+        requirement=finding.requirement,
+        grounded_count=grounded_count,
+        has_source_document=bool(source_document),
+    )
+
+    return finding.model_copy(
+        update={
+            "status": next_status,
+            "evidence": evidence,
+            "source_document": source_document,
+            "evidence_items": evidence_items,
+        }
+    )
+
+
+def _derive_status_from_grounded_evidence(
+    *,
+    requirement: str,
+    grounded_count: int,
+    has_source_document: bool,
+) -> str:
+    if grounded_count <= 0 or not has_source_document:
+        return "not_satisfied"
+    required_evidence_items = (
+        MIN_STRONG_CLAIM_EVIDENCE_ITEMS
+        if _requires_multiple_citations(requirement)
+        else MIN_SATISFIED_EVIDENCE_ITEMS
+    )
+    if grounded_count >= required_evidence_items:
+        return "satisfied"
+    return "partial"
+
+
+def _requires_multiple_citations(requirement: str) -> bool:
+    text = normalize_whitespace(requirement).lower()
+    if not text:
+        return False
+    markers = (
+        " both ",
+        " each ",
+        " all ",
+        " including ",
+        " include ",
+        " as well as ",
+    )
+    padded = f" {text} "
+    return any(marker in padded for marker in markers)
 
 
 def flatten_record_sections(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -882,6 +1055,7 @@ def _build_linked_rows(analysis: ComplianceAnalysis) -> list[ComplianceLinkedRow
                 requirement_ref=f"REQ-{index + 1}",
                 requirement=finding.requirement,
                 status=finding.status,
+                rationale="",
                 gap=gap,
                 recommendation=recommendation,
             )

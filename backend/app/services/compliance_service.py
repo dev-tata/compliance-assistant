@@ -4,7 +4,6 @@ from typing import Any
 
 from app.schemas.compliance import ComplianceRequest, ComplianceResponse
 from app.services.compliance_methods.two_stage_rag_service import run_two_stage_rag_compliance
-from app.services.compliance_methods.non_rag_service import run_non_rag_compliance
 
 
 def run_case_compliance_analysis(
@@ -13,14 +12,7 @@ def run_case_compliance_analysis(
     case_payload: dict[str, Any],
     request: ComplianceRequest,
 ) -> ComplianceResponse:
-    if request.method == "two_stage_rag":
-        return run_two_stage_rag_compliance(
-            case_id=case_id,
-            case_payload=case_payload,
-            request=request,
-        )
-
-    return run_non_rag_compliance(
+    return run_two_stage_rag_compliance(
         case_id=case_id,
         case_payload=case_payload,
         request=request,

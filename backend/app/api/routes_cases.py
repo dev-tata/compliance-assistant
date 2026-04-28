@@ -323,17 +323,11 @@ def _validate_compliance_inputs(*, case_payload: dict, request: ComplianceReques
     if not records:
         raise HTTPException(status_code=400, detail="Compliance requires record documents.")
 
-    if request.method == "non_rag":
-        return
-
     if not prepare_record_indexes(records):
         raise HTTPException(
             status_code=400,
             detail=f"{request.method} requires retrievable record sections and record indexes.",
         )
-
-    if request.method != "two_stage_rag":
-        return
 
     if not references:
         raise HTTPException(

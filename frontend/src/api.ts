@@ -1,7 +1,7 @@
 import type {
   CaseDocuments,
   CaseRecord,
-  ComplianceMethod,
+  ComplianceRunMethod,
   ComplianceResponse,
   ComplianceSummary,
   DeliverableExtractionResponse,
@@ -190,7 +190,7 @@ export async function runCompliance(input: {
   caseId: string;
   provider: string;
   model: string;
-  method: ComplianceMethod;
+  method: ComplianceRunMethod;
   instructions?: string;
   selectedDeliverablesByDocument?: SelectedDeliverablesByDocument;
   additionalDocumentFilenames?: string[];

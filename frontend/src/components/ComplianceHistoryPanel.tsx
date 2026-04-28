@@ -4,14 +4,6 @@ import type { CaseDocuments, CaseRecord, ComplianceSummary, DocumentRecord } fro
 import { formatDateTime } from "../utils/formatDateTime";
 import { formatMethodLabel } from "../utils/formatMethodLabel";
 
-function formatScore(value: number) {
-  return value.toFixed(4);
-}
-
-function formatCompletedFromM2(value: number) {
-  return `${Math.round(value * 100)}%`;
-}
-
 function normalizeSearchValue(value: string) {
   return value
     .normalize("NFKD")
@@ -139,9 +131,7 @@ export function ComplianceHistoryPanel({
                     <div className="history-main">
                       <div className="history-title-row">
                         <span className="history-case">{caseTitleById.get(item.case_id) ?? item.case_id}</span>
-                        <span className="document-option-meta">Completed <strong>{formatCompletedFromM2(item.m2_ordinal_score)}</strong></span>
-                        <span className="document-option-meta">· Evidence Support <strong>{formatScore(item.m3_evidence_weighted_score)}</strong></span>
-                        <span className="document-option-meta">· Grounding Quality <strong>{formatScore(item.m5_grounding_score)}</strong></span>
+                        <span className="document-option-meta">Completed <strong>{item.completion_percent}%</strong></span>
                         <span className="history-status-group">
                           <span className="history-status-chip history-status-chip-satisfied">SATISFIED</span>
                           <strong className="history-status-count">{item.satisfied_count}</strong>

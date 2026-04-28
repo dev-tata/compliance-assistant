@@ -61,18 +61,15 @@ export type ComplianceSummary = {
   provider: string;
   model: string;
   method: ComplianceMethod;
-  overall_assessment: string;
   completion_percent: number;
-  m2_ordinal_score: number;
   satisfied_count: number;
   partial_count: number;
   not_satisfied_count: number;
-  m3_evidence_weighted_score: number;
-  m5_grounding_score: number;
   reference_stored_filenames: string[];
 };
 
 export type ComplianceMethod = "non_rag" | "two_stage_rag";
+export type ComplianceRunMethod = "two_stage_rag";
 
 export type ComplianceStatus = "satisfied" | "partial" | "not_satisfied";
 
@@ -80,16 +77,19 @@ export type ComplianceFinding = {
   requirement: string;
   status: ComplianceStatus;
   evidence: string[];
-  source_documents: string[];
+  source_document: string;
   evidence_items?: ComplianceEvidenceItem[];
   evidence_strength: number;
-  confidence: number;
   weight: number;
+  material_element_count: number;
+  requirement_coverage_percent: number;
+  evidence_breadth: number;
+  expected_evidence_breadth: number;
 };
 
 export type ComplianceEvidenceItem = {
   text: string;
-  source_documents: string[];
+  source_document: string;
   stage_key?: string | null;
   stage_label?: string | null;
 };
@@ -98,25 +98,22 @@ export type ComplianceLinkedRow = {
   requirement: string;
   requirement_ref?: string;
   status: ComplianceStatus;
+  rationale: string;
   gap: string;
   recommendation: string;
   record_recall_at_k?: number | null;
 };
 
 export type ComplianceAnalysis = {
-  overall_assessment: string;
   completion_percent: number;
+  weighted_completion_percent: number;
+  overall_coverage_percent: number;
+  weighted_coverage_percent: number;
   gaps: string[];
   linked_rows: ComplianceLinkedRow[];
   findings: ComplianceFinding[];
   procedure_to_record?: ComplianceFinding[];
   recommended_actions: string[];
-};
-
-export type ComplianceScores = {
-  m2_ordinal_score: number;
-  m3_evidence_weighted_score: number;
-  m5_grounding_score: number;
 };
 
 export type SectionMatch = {
@@ -142,7 +139,6 @@ export type ComplianceStageResult = {
   stage_label: string;
   method: string;
   analysis: ComplianceAnalysis;
-  scores: ComplianceScores;
   retrieval_metrics?: RetrievalMetrics | null;
 };
 
@@ -157,13 +153,11 @@ export type ComplianceResponse = {
   created_at: string;
   saved_at: string;
   analysis: ComplianceAnalysis;
-  scores: ComplianceScores;
   section_matches: SectionMatch[];
   retrieval_metrics?: RetrievalMetrics | null;
   stages?: ComplianceStageResult[];
   baseline_method?: string | null;
   baseline_analysis?: ComplianceAnalysis | null;
-  baseline_scores?: ComplianceScores | null;
   baseline_retrieval_metrics?: RetrievalMetrics | null;
 };
 

@@ -7,12 +7,13 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 ComplianceStatus = Literal["satisfied", "partial", "not_satisfied"]
 ComplianceMethod = Literal["non_rag", "two_stage_rag"]
+ComplianceRequestMethod = Literal["two_stage_rag"]
 ComplianceRequirementSource = Literal["auto", "procedure_sections", "deliverables"]
 
 class ComplianceRequest(BaseModel):
     provider: str
     model: str
-    method: ComplianceMethod = "non_rag"
+    method: ComplianceRequestMethod = "two_stage_rag"
     instructions: str | None = None
     requirement_source: ComplianceRequirementSource = "deliverables"
     deliverable_file_name: str | None = None
@@ -21,7 +22,7 @@ class ComplianceRequest(BaseModel):
 
     @model_validator(mode="after")
     def normalize_requirement_source(self) -> "ComplianceRequest":
-        if self.method in {"non_rag", "two_stage_rag"}:
+        if self.method == "two_stage_rag":
             self.requirement_source = "deliverables"
         return self
 
@@ -32,18 +33,23 @@ class ComplianceRequest(BaseModel):
             return data
         data = dict(data)
         data["method"] = _normalize_compliance_method(data.get("method"))
+        if data["method"] == "non_rag":
+            data["method"] = "two_stage_rag"
         return data
 
 
 class ComplianceFinding(BaseModel):
     requirement: str
-    status: ComplianceStatus
+    status: ComplianceStatus = "not_satisfied"
     evidence: list[str] = Field(default_factory=list)
-    source_documents: list[str] = Field(default_factory=list)
+    source_document: str = ""
     evidence_items: list["ComplianceEvidenceItem"] = Field(default_factory=list)
+    evidence_breadth: int = Field(default=0, ge=0)
+    expected_evidence_breadth: int = Field(default=1, ge=1)
     evidence_strength: float = Field(default=0.0, ge=0.0, le=1.0)
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     weight: float = Field(default=1.0, gt=0.0)
+    material_element_count: int = Field(default=1, ge=1)
+    requirement_coverage_percent: int = Field(default=0, ge=0, le=100)
 
     @model_validator(mode="before")
     @classmethod
@@ -51,12 +57,14 @@ class ComplianceFinding(BaseModel):
         if not isinstance(data, dict):
             return data
         data = dict(data)
-        data["status"] = _normalize_compliance_status(data.get("status"))
+        data["status"] = _normalize_compliance_status(data.get("status") or "not_satisfied")
         data["evidence"] = _normalize_string_list(data.get("evidence"))
-        data["source_documents"] = _normalize_string_list(data.get("source_documents"))
+        data["source_document"] = _normalize_source_document(
+            data.get("source_document", data.get("source_documents"))
+        )
         if not data.get("evidence_items") and data.get("evidence"):
             data["evidence_items"] = [
-                {"text": text, "source_documents": data["source_documents"]}
+                {"text": text, "source_document": data["source_document"]}
                 for text in data["evidence"]
             ]
         return data
@@ -64,7 +72,7 @@ class ComplianceFinding(BaseModel):
 
 class ComplianceEvidenceItem(BaseModel):
     text: str
-    source_documents: list[str] = Field(default_factory=list)
+    source_document: str = ""
     stage_key: str | None = None
     stage_label: str | None = None
 
@@ -77,13 +85,16 @@ class ComplianceEvidenceItem(BaseModel):
             return data
         data = dict(data)
         data["text"] = str(data.get("text") or "").strip()
-        data["source_documents"] = _normalize_string_list(data.get("source_documents"))
+        data["source_document"] = _normalize_source_document(
+            data.get("source_document", data.get("source_documents"))
+        )
         return data
 
 class ComplianceLinkedRow(BaseModel):
     requirement: str = ""
     requirement_ref: str = ""
-    status: ComplianceStatus
+    status: ComplianceStatus = "not_satisfied"
+    rationale: str = ""
     gap: str = ""
     recommendation: str = ""
     record_recall_at_k: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -94,13 +105,16 @@ class ComplianceLinkedRow(BaseModel):
         if not isinstance(data, dict):
             return data
         data = dict(data)
-        data["status"] = _normalize_compliance_status(data.get("status"))
+        data["status"] = _normalize_compliance_status(data.get("status") or "not_satisfied")
+        data["rationale"] = str(data.get("rationale") or "").strip()
         return data
 
 
 class ComplianceAnalysis(BaseModel):
-    overall_assessment: str
     completion_percent: int = Field(default=0, ge=0, le=100)
+    weighted_completion_percent: int = Field(default=0, ge=0, le=100)
+    overall_coverage_percent: int = Field(default=0, ge=0, le=100)
+    weighted_coverage_percent: int = Field(default=0, ge=0, le=100)
     gaps: list[str] = Field(default_factory=list)
     linked_rows: list[ComplianceLinkedRow] = Field(default_factory=list)
     findings: list[ComplianceFinding] = Field(default_factory=list)
@@ -135,12 +149,6 @@ class ComplianceAnalysis(BaseModel):
         return self
 
 
-class ComplianceScores(BaseModel):
-    m2_ordinal_score: float
-    m3_evidence_weighted_score: float
-    m5_grounding_score: float
-
-
 class SectionMatch(BaseModel):
     procedure_document: str
     procedure_section_label: str | None = None
@@ -164,7 +172,6 @@ class ComplianceStageResult(BaseModel):
     stage_label: str
     method: str
     analysis: ComplianceAnalysis
-    scores: ComplianceScores
     retrieval_metrics: RetrievalMetrics | None = None
 
 
@@ -187,13 +194,11 @@ class ComplianceResponse(BaseModel):
     created_at: str
     saved_at: str
     analysis: ComplianceAnalysis
-    scores: ComplianceScores
     section_matches: list[SectionMatch] = Field(default_factory=list)
     retrieval_metrics: RetrievalMetrics | None = None
     stages: list[ComplianceStageResult] = Field(default_factory=list)
     baseline_method: str | None = None
     baseline_analysis: ComplianceAnalysis | None = None
-    baseline_scores: ComplianceScores | None = None
     baseline_retrieval_metrics: RetrievalMetrics | None = None
 
     @model_validator(mode="before")
@@ -246,3 +251,8 @@ def _normalize_string_list(value: object) -> list[str]:
         return normalized_items
     text = str(value).strip()
     return [text] if text else []
+
+
+def _normalize_source_document(value: object) -> str:
+    normalized = _normalize_string_list(value)
+    return normalized[0] if normalized else ""

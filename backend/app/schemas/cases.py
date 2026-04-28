@@ -52,12 +52,8 @@ class ComplianceSummary(BaseModel):
     provider: str
     model: str
     method: str = "non_rag"
-    overall_assessment: str
     completion_percent: int = Field(default=0, ge=0, le=100)
-    m2_ordinal_score: float = Field(default=0.0, ge=0.0)
     satisfied_count: int = Field(default=0, ge=0)
     partial_count: int = Field(default=0, ge=0)
     not_satisfied_count: int = Field(default=0, ge=0)
-    m3_evidence_weighted_score: float = Field(default=0.0, ge=0.0)
-    m5_grounding_score: float = Field(default=0.0, ge=0.0)
     reference_stored_filenames: list[str] = Field(default_factory=list)

@@ -1,27 +1,22 @@
 from __future__ import annotations
 
+import re
+
 from app.schemas.compliance import (
     ComplianceAnalysis,
     ComplianceFinding,
-    ComplianceScores,
 )
-
-
-def _safe_div(num: float, den: float) -> float:
-    if den == 0:
-        return 0.0
-    return num / den
-
-
 def enrich_analysis_for_scoring(
     analysis: ComplianceAnalysis,
     *,
     requirement_weights: list[float] | None = None,
+    deliverable_metadata: list[dict[str, object]] | None = None,
 ) -> ComplianceAnalysis:
     enriched_findings = [
         _enrich_finding(
             finding,
             weight=requirement_weights[index] if requirement_weights and index < len(requirement_weights) else None,
+            deliverable_meta=deliverable_metadata[index] if deliverable_metadata and index < len(deliverable_metadata) else None,
         )
         for index, finding in enumerate(analysis.findings)
     ]
@@ -37,43 +32,89 @@ def _enrich_finding(
     finding: ComplianceFinding,
     *,
     weight: float | None = None,
+    deliverable_meta: dict[str, object] | None = None,
 ) -> ComplianceFinding:
-    evidence_strength = _compute_evidence_strength(finding)
-    confidence = _compute_confidence(finding.status, evidence_strength)
     effective_weight = weight if weight is not None else _compute_weight(finding.requirement)
-    return finding.model_copy(
+    expected_evidence_breadth = _coerce_expected_evidence_breadth(deliverable_meta)
+    material_element_count = _estimate_material_element_count(finding.requirement)
+    adjusted_status = _apply_structural_breadth_threshold(
+        status=finding.status,
+        evidence_breadth=finding.evidence_breadth,
+        expected_evidence_breadth=expected_evidence_breadth,
+    )
+    normalized_finding = finding.model_copy(
         update={
-            "evidence_strength": evidence_strength,
-            "confidence": confidence,
-            "weight": effective_weight,
+            "status": adjusted_status,
+            "expected_evidence_breadth": expected_evidence_breadth,
         }
     )
-def _compute_evidence_strength(finding: ComplianceFinding) -> float:
-    evidence_count = len(finding.evidence)
-    source_count = len(set(finding.source_documents))
+    evidence_strength = _compute_evidence_strength(
+        normalized_finding,
+        material_element_count=material_element_count,
+    )
+    requirement_coverage_percent = _compute_requirement_coverage_percent(
+        finding=normalized_finding,
+        material_element_count=material_element_count,
+    )
+    return normalized_finding.model_copy(
+        update={
+            "evidence_strength": evidence_strength,
+            "weight": effective_weight,
+            "material_element_count": material_element_count,
+            "requirement_coverage_percent": requirement_coverage_percent,
+        }
+    )
 
-    if evidence_count == 0:
+
+def _coerce_expected_evidence_breadth(deliverable_meta: dict[str, object] | None) -> int:
+    if not deliverable_meta:
+        return 1
+    raw = deliverable_meta.get("expected_evidence_breadth")
+    if isinstance(raw, (int, float)) and raw >= 1:
+        return int(raw)
+    return 1
+
+
+def _apply_structural_breadth_threshold(
+    *,
+    status: str,
+    evidence_breadth: int,
+    expected_evidence_breadth: int,
+) -> str:
+    if status != "satisfied":
+        return status
+    if evidence_breadth <= 0:
+        return status
+    if expected_evidence_breadth <= 1:
+        return status
+    return status if evidence_breadth >= expected_evidence_breadth else "partial"
+
+
+def _compute_evidence_strength(
+    finding: ComplianceFinding,
+    *,
+    material_element_count: int,
+) -> float:
+    evidence_count = max(len(finding.evidence_items), len(finding.evidence))
+    grounded_evidence_count = (
+        sum(1 for item in finding.evidence_items if item.source_document)
+        if finding.evidence_items
+        else min(evidence_count, 1) if evidence_count and finding.source_document else 0
+    )
+    if grounded_evidence_count <= 0:
         return 0.0
 
-    base = 0.35 + (0.2 * min(evidence_count, 3)) + (0.1 * min(source_count, 2))
+    expected_breadth = max(1, finding.expected_evidence_breadth)
+    observed_breadth = (
+        min(finding.evidence_breadth, expected_breadth)
+        if finding.evidence_breadth > 0
+        else min(grounded_evidence_count, expected_breadth)
+    )
+    breadth_ratio = min(1.0, observed_breadth / expected_breadth)
+    density_ratio = min(1.0, grounded_evidence_count / max(1, material_element_count))
 
-    if finding.status == "partial":
-        base *= 0.8
-    elif finding.status == "not_satisfied":
-        base *= 0.6
+    return round((0.7 * breadth_ratio) + (0.3 * density_ratio), 4)
 
-    return round(min(1.0, base), 4)
-
-
-def _compute_confidence(status: str, evidence_strength: float) -> float:
-    if status == "satisfied":
-        confidence = 0.55 + (0.45 * evidence_strength)
-    elif status == "partial":
-        confidence = 0.45 + (0.35 * evidence_strength)
-    else:
-        confidence = 0.35 + (0.4 * evidence_strength)
-
-    return round(min(1.0, max(0.0, confidence)), 4)
 def _compute_weight(requirement: str) -> float:
     text = requirement.lower()
 
@@ -89,58 +130,46 @@ def _compute_weight(requirement: str) -> float:
     return 1.0
 
 
-def compute_scores(
-    analysis: ComplianceAnalysis,
+def _estimate_material_element_count(requirement: str) -> int:
+    text = " ".join(str(requirement or "").split())
+    if not text:
+        return 1
+    segments = [
+        segment.strip(" ,.:")
+        for segment in re.split(r";|\n+|\b(?:as well as|together with|including)\b", text, flags=re.IGNORECASE)
+        if segment.strip(" ,.:")
+    ]
+    if len(segments) == 1 and len(text) >= 100:
+        and_parts = [
+            part.strip(" ,.:")
+            for part in re.split(r"\band\b", text, flags=re.IGNORECASE)
+            if part.strip(" ,.:")
+        ]
+        if 1 < len(and_parts) <= 3 and all(len(part) >= 12 for part in and_parts):
+            segments = and_parts
+    return max(1, min(len(segments), 5))
+
+
+def _compute_requirement_coverage_percent(
     *,
-    weighted_m2: bool = False,
-) -> ComplianceScores:
-    findings = analysis.findings
-    if not findings:
-        return ComplianceScores(
-            m2_ordinal_score=0.0,
-            m3_evidence_weighted_score=0.0,
-            m5_grounding_score=0.0,
-        )
-
-    ordinal_map = {
-        "satisfied": 1.0,
-        "partial": 0.5,
-        "not_satisfied": 0.0,
-    }
-
-    total_weight = sum(f.weight for f in findings)
-
-    if weighted_m2:
-        m2 = _safe_div(
-            sum(ordinal_map.get(f.status, 0.0) * f.weight for f in findings),
-            total_weight,
-        )
-    else:
-        m2 = _safe_div(
-            sum(ordinal_map.get(f.status, 0.0) for f in findings),
-            len(findings),
-        )
-
-    m3 = _safe_div(
-        sum(
-            ordinal_map.get(f.status, 0.0) * f.evidence_strength * f.weight
-            for f in findings
-        ),
-        total_weight,
+    finding: ComplianceFinding,
+    material_element_count: int,
+) -> int:
+    evidence_count = max(len(finding.evidence_items), len(finding.evidence))
+    grounded_count = (
+        sum(1 for item in finding.evidence_items if item.source_document)
+        if finding.evidence_items
+        else min(evidence_count, 1) if evidence_count and finding.source_document else 0
     )
-
-    evidence_presence = sum(1.0 if f.evidence else 0.0 for f in findings) / len(findings)
-    avg_evidence_strength = _safe_div(
-        sum(f.evidence_strength for f in findings if f.evidence),
-        len([f for f in findings if f.evidence]),
+    if grounded_count <= 0:
+        return 0
+    element_ratio = min(1.0, grounded_count / max(1, material_element_count))
+    breadth_ratio = min(
+        1.0,
+        (
+            min(finding.evidence_breadth, finding.expected_evidence_breadth)
+            if finding.evidence_breadth > 0
+            else min(grounded_count, finding.expected_evidence_breadth)
+        ) / max(1, finding.expected_evidence_breadth),
     )
-    grounded_items = sum(
-        1.0 if f.evidence and f.source_documents else 0.0 for f in findings
-    ) / len(findings)
-    m5 = (evidence_presence + avg_evidence_strength + grounded_items) / 3.0
-
-    return ComplianceScores(
-        m2_ordinal_score=round(m2, 4),
-        m3_evidence_weighted_score=round(m3, 4),
-        m5_grounding_score=round(m5, 4),
-    )
+    return round(100 * min(element_ratio, breadth_ratio))
