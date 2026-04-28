@@ -87,17 +87,32 @@ function renderLinkedRows(
 
   return rows.map((row, index) => {
     const evidenceStrength = procedureToRecord?.[index]?.evidence_strength;
+    const coverage = procedureToRecord?.[index]?.requirement_coverage_percent;
+    const invalidReason = procedureToRecord?.[index]?.evidence_items?.find(
+      (item) => item.is_valid_for_requirement === false && item.invalid_reason,
+    )?.invalid_reason;
+    const invalidReasonLabel = invalidReason
+      ? `Grounded evidence excluded from scoring: ${invalidReason.replace(/_/g, " ")}.`
+      : "";
+    const normalizedRationale = (row.rationale || "").trim().toLowerCase();
+    const showRationale = normalizedRationale
+      && normalizedRationale !== invalidReasonLabel.trim().toLowerCase();
     const evidenceStrengthLabel = typeof evidenceStrength === "number"
       ? `${(evidenceStrength * 100).toFixed(1)}%`
+      : "&mdash;";
+    const coverageLabel = typeof coverage === "number"
+      ? `${coverage}%`
       : "&mdash;";
     return `
     <tr>
       <td>${index + 1}</td>
       <td>
         <div>${escapeHtml(row.requirement) || "&mdash;"}</div>
-        ${row.rationale ? `<div class="row-rationale">${escapeHtml(row.rationale)}</div>` : ""}
+        ${showRationale ? `<div class="row-rationale">${escapeHtml(row.rationale)}</div>` : ""}
+        ${invalidReason ? `<div class="row-invalid-reason">${escapeHtml(invalidReasonLabel)}</div>` : ""}
       </td>
       <td>${evidenceStrengthLabel}</td>
+      <td>${coverageLabel}</td>
       <td>${escapeHtml(row.status) || "&mdash;"}</td>
     </tr>
   `;
@@ -242,6 +257,7 @@ function renderEvidenceList(
     <li>
       ${escapeHtml(item.text)}
       ${item.stage_label ? ` <span class="evidence-stage">${escapeHtml(item.stage_label)}</span>` : ""}
+      ${item.is_valid_for_requirement === false ? ` <span class="evidence-flag evidence-flag-invalid">Invalid</span>` : ""}
     </li>
   `).join("");
 }
@@ -307,6 +323,7 @@ function renderStagePanel(
                   <th>#</th>
                   <th>Requirement</th>
                   <th>Evidence Strength</th>
+                  <th>Coverage</th>
                   <th>Status</th>
                 </tr>
               </thead>
@@ -436,6 +453,11 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
             color: #6f6252;
             font-size: 0.72rem;
           }
+          .row-invalid-reason {
+            margin-top: 4px;
+            color: #9b2226;
+            font-size: 0.72rem;
+          }
           .gap-table tr:last-child td {
             border-bottom: none;
           }
@@ -486,6 +508,19 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
             font-size: 0.68rem;
             text-transform: uppercase;
             letter-spacing: 0.03em;
+          }
+          .evidence-flag {
+            display: inline-block;
+            margin-left: 6px;
+            padding: 1px 6px;
+            border-radius: 999px;
+            font-size: 0.68rem;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+          }
+          .evidence-flag-invalid {
+            background: #ffdedd;
+            color: #9b2226;
           }
           .stage-panel {
             border: 1px solid #d8c8a8;

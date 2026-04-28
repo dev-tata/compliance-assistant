@@ -4,8 +4,16 @@ import re
 
 from app.schemas.compliance import (
     ComplianceAnalysis,
+    ComplianceEvidenceItem,
     ComplianceFinding,
 )
+
+
+def _valid_evidence_items(finding: ComplianceFinding) -> list[ComplianceEvidenceItem]:
+    return [
+        item for item in finding.evidence_items
+        if item.source_document and item.is_valid_for_requirement
+    ]
 def enrich_analysis_for_scoring(
     analysis: ComplianceAnalysis,
     *,
@@ -99,11 +107,10 @@ def _compute_evidence_strength(
     *,
     material_element_count: int,
 ) -> float:
-    evidence_count = max(len(finding.evidence_items), len(finding.evidence))
-    grounded_evidence_count = (
-        sum(1 for item in finding.evidence_items if item.source_document)
-        if finding.evidence_items
-        else min(evidence_count, 1) if evidence_count and finding.source_document else 0
+    valid_items = _valid_evidence_items(finding)
+    evidence_count = len(valid_items)
+    grounded_evidence_count = evidence_count if finding.evidence_items else (
+        min(max(len(finding.evidence), 0), 1) if finding.evidence and finding.source_document else 0
     )
     if grounded_evidence_count <= 0:
         return 0.0
@@ -159,11 +166,10 @@ def _compute_requirement_coverage_percent(
     finding: ComplianceFinding,
     material_element_count: int,
 ) -> int:
-    evidence_count = max(len(finding.evidence_items), len(finding.evidence))
-    grounded_count = (
-        sum(1 for item in finding.evidence_items if item.source_document)
-        if finding.evidence_items
-        else min(evidence_count, 1) if evidence_count and finding.source_document else 0
+    valid_items = _valid_evidence_items(finding)
+    evidence_count = len(valid_items)
+    grounded_count = evidence_count if finding.evidence_items else (
+        min(max(len(finding.evidence), 0), 1) if finding.evidence and finding.source_document else 0
     )
     if grounded_count <= 0:
         return 0

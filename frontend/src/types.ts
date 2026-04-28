@@ -92,6 +92,8 @@ export type ComplianceEvidenceItem = {
   source_document: string;
   stage_key?: string | null;
   stage_label?: string | null;
+  is_valid_for_requirement?: boolean;
+  invalid_reason?: string | null;
 };
 
 export type ComplianceLinkedRow = {

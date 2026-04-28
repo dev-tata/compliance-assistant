@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.schemas.compliance import (
@@ -53,6 +54,12 @@ STAGE_LABELS = {
     STAGE_2_KEY: "Stage 2 - Record Retrieval",
     STAGE_3_KEY: "Stage 3 - Reference Retrieval",
 }
+CONSISTENCY_LABEL_RANKS = {
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "critical": 4,
+}
 
 
 def run_two_stage_rag_compliance(
@@ -80,7 +87,6 @@ def run_two_stage_rag_compliance(
     reference_context_indexes = prepare_reference_indexes(case_payload.get("references", []))
     if not reference_context_indexes:
         raise LLMGenerationError("two_stage_rag requires retrievable reference sections.")
-
     allowed_record_documents = {
         normalize_whitespace(document.get("source_filename") or document.get("stored_filename"))
         for document in case_payload.get("records", [])
@@ -439,10 +445,11 @@ def _normalize_retrieval_stage_analysis(
         deliverable_metadata=deliverables,
     )
     if stage_key == STAGE_2_KEY:
-        analysis = _apply_stage_2_rationale_penalties(
+        analysis = _apply_stage_2_consistency_penalties(
             analysis=analysis,
             deliverables=deliverables,
             linked_rows=analysis.linked_rows,
+            retrieved_payload=retrieved_payload,
         )
     return assemble_compliance_analysis(
         findings=analysis.procedure_to_record or analysis.findings,
@@ -776,11 +783,12 @@ def _strip_stage_feedback(analysis: ComplianceAnalysis) -> ComplianceAnalysis:
     )
 
 
-def _apply_stage_2_rationale_penalties(
+def _apply_stage_2_consistency_penalties(
     *,
     analysis: ComplianceAnalysis,
     deliverables: list[dict[str, Any]],
     linked_rows: list[ComplianceLinkedRow],
+    retrieved_payload: list[dict[str, Any]],
 ) -> ComplianceAnalysis:
     findings = analysis.procedure_to_record or analysis.findings
     penalized_findings: list[ComplianceFinding] = []
@@ -788,40 +796,124 @@ def _apply_stage_2_rationale_penalties(
     for index, finding in enumerate(findings):
         row = linked_rows[index] if index < len(linked_rows) else None
         deliverable = deliverables[index] if index < len(deliverables) else {}
-        penalty = _derive_stage_2_rationale_penalty(
-            requirement=finding.requirement,
-            rationale=row.rationale if row else "",
-            deliverable=deliverable,
+        retrieved_sections = (
+            retrieved_payload[index].get("retrieved_record_sections", [])
+            if index < len(retrieved_payload)
+            else []
         )
+        penalty = _derive_stage_structured_penalty(
+            requirement=finding.requirement,
+            deliverable=deliverable,
+            retrieved_record_sections=retrieved_sections,
+        )
+        if penalty["coverage_cap"] >= 100 and penalty["strength_factor"] >= 1.0:
+            penalty = _derive_stage_2_rationale_penalty(
+                requirement=finding.requirement,
+                rationale=row.rationale if row else "",
+                deliverable=deliverable,
+            )
         if penalty["coverage_cap"] >= 100 and penalty["strength_factor"] >= 1.0:
             penalized_findings.append(finding)
             continue
 
-        next_coverage = min(
-            int(finding.requirement_coverage_percent or 0),
-            int(penalty["coverage_cap"]),
-        )
-        next_strength = min(
-            float(finding.evidence_strength or 0.0),
-            round(float(finding.evidence_strength or 0.0) * float(penalty["strength_factor"]), 4),
-        )
-        next_status = _coverage_percent_to_status(next_coverage)
+        invalid_reason = str(penalty.get("invalid_reason") or "invalid_for_requirement")
+        invalidated_items = [
+            item.model_copy(
+                update={
+                    "is_valid_for_requirement": False,
+                    "invalid_reason": invalid_reason,
+                }
+            )
+            for item in finding.evidence_items
+        ]
+        if row is not None:
+            linked_rows[index] = row.model_copy(
+                update={
+                    "rationale": (
+                        row.rationale
+                        .replace(f"Grounded evidence excluded from scoring: {invalid_reason.replace('_', ' ')}.", "")
+                        .strip()
+                    )
+                }
+            )
         penalized_findings.append(
             finding.model_copy(
                 update={
-                    "requirement_coverage_percent": next_coverage,
-                    "evidence_strength": next_strength,
-                    "status": next_status,
+                    "evidence_items": invalidated_items,
+                    "evidence_breadth": 0,
                 }
             )
         )
 
-    return analysis.model_copy(
+    rescored = enrich_analysis_for_scoring(
+        analysis.model_copy(
+            update={
+                "procedure_to_record": penalized_findings,
+                "findings": penalized_findings,
+                "linked_rows": linked_rows,
+            }
+        ),
+        deliverable_metadata=deliverables,
+    )
+    return rescored.model_copy(
         update={
-            "procedure_to_record": penalized_findings,
-            "findings": penalized_findings,
+            "linked_rows": linked_rows,
         }
     )
+
+
+def _derive_stage_structured_penalty(
+    *,
+    requirement: str,
+    deliverable: dict[str, Any],
+    retrieved_record_sections: list[dict[str, Any]],
+) -> dict[str, object]:
+    requirement_text = normalize_whitespace(requirement).lower()
+    deliverable_text = normalize_whitespace(deliverable.get("requirement_text") or "").lower()
+    combined_requirement = " ".join(part for part in (requirement_text, deliverable_text) if part)
+    dimension = _infer_consistency_dimension(combined_requirement)
+    if not dimension:
+        return {"coverage_cap": 100.0, "strength_factor": 1.0}
+
+    requires_overall = "overall" in combined_requirement
+    requires_highest = "highest" in combined_requirement or "determined by" in combined_requirement
+    requires_recorded = any(marker in combined_requirement for marker in ("recorded", "documented"))
+    if not requires_overall and not requires_highest:
+        return {"coverage_cap": 100.0, "strength_factor": 1.0}
+
+    signals = _collect_dimension_signals(
+        retrieved_record_sections=retrieved_record_sections,
+        dimension=dimension,
+    )
+    derived_max = signals["derived_max"]
+    stated_highest = signals["stated_highest"]
+    stated_overall = signals["stated_overall"]
+
+    if requires_highest and derived_max and stated_highest and derived_max != stated_highest:
+        return {
+            "coverage_cap": 19.0,
+            "strength_factor": 0.35,
+            "invalid_reason": "contradicts_table_derived_highest_value",
+        }
+    if requires_overall and derived_max and stated_overall and derived_max != stated_overall:
+        return {
+            "coverage_cap": 19.0,
+            "strength_factor": 0.35,
+            "invalid_reason": "contradicts_table_derived_overall_value",
+        }
+    if requires_recorded and requires_overall and derived_max and not stated_overall:
+        return {
+            "coverage_cap": 19.0,
+            "strength_factor": 0.6,
+            "invalid_reason": "missing_explicit_overall_value",
+        }
+    if requires_highest and derived_max and not stated_highest:
+        return {
+            "coverage_cap": 19.0,
+            "strength_factor": 0.6,
+            "invalid_reason": "missing_explicit_highest_value",
+        }
+    return {"coverage_cap": 100.0, "strength_factor": 1.0}
 
 
 def _derive_stage_2_rationale_penalty(
@@ -829,7 +921,7 @@ def _derive_stage_2_rationale_penalty(
     requirement: str,
     rationale: str,
     deliverable: dict[str, Any],
-) -> dict[str, float]:
+) -> dict[str, object]:
     rationale_text = normalize_whitespace(rationale).lower()
     requirement_text = normalize_whitespace(requirement).lower()
     deliverable_text = normalize_whitespace(deliverable.get("requirement_text") or "").lower()
@@ -878,12 +970,161 @@ def _derive_stage_2_rationale_penalty(
     )
 
     if has_hierarchy_marker and (has_missing_marker or has_weak_support_marker or expects_high_level):
-        return {"coverage_cap": 19.0, "strength_factor": 0.35}
+        return {
+            "coverage_cap": 19.0,
+            "strength_factor": 0.35,
+            "invalid_reason": "rationale_hierarchy_mismatch",
+        }
     if has_hierarchy_marker or (expects_high_level and has_weak_support_marker):
-        return {"coverage_cap": 49.0, "strength_factor": 0.6}
+        return {
+            "coverage_cap": 49.0,
+            "strength_factor": 0.6,
+            "invalid_reason": "rationale_scope_or_level_mismatch",
+        }
     if has_weak_support_marker:
-        return {"coverage_cap": 79.0, "strength_factor": 0.85}
+        return {
+            "coverage_cap": 79.0,
+            "strength_factor": 0.85,
+            "invalid_reason": "rationale_weak_or_indirect_support",
+        }
     return {"coverage_cap": 100.0, "strength_factor": 1.0}
+
+
+def _infer_consistency_dimension(requirement_text: str) -> str | None:
+    if "criticality" in requirement_text:
+        return "criticality"
+    if "complexity" in requirement_text:
+        return "complexity"
+    if "risk class" in requirement_text or "classification" in requirement_text:
+        return "risk class"
+    return None
+
+
+def _collect_dimension_signals(
+    *,
+    retrieved_record_sections: list[dict[str, Any]],
+    dimension: str,
+) -> dict[str, str]:
+    normalized_dimension = dimension.lower()
+    prose_chunks: list[str] = []
+    table_values: list[str] = []
+
+    for section in retrieved_record_sections:
+        prose_chunks.append(normalize_whitespace(section.get("text") or ""))
+        prose_chunks.append(normalize_whitespace(section.get("table_markdown") or ""))
+        table_markdown = section.get("table_markdown")
+        if isinstance(table_markdown, str) and table_markdown.strip():
+            table_values.extend(
+                _extract_dimension_values_from_table(
+                    table_markdown=table_markdown,
+                    dimension=normalized_dimension,
+                )
+            )
+
+    prose_text = "\n".join(chunk for chunk in prose_chunks if chunk).lower()
+    return {
+        "derived_max": _derive_max_ranked_value(table_values),
+        "stated_highest": _extract_ranked_claim_value(
+            prose_text=prose_text,
+            dimension=normalized_dimension,
+            claim_type="highest",
+        ),
+        "stated_overall": _extract_ranked_claim_value(
+            prose_text=prose_text,
+            dimension=normalized_dimension,
+            claim_type="overall",
+        ),
+    }
+
+
+def _extract_dimension_values_from_table(*, table_markdown: str, dimension: str) -> list[str]:
+    rows = _parse_table_markdown(table_markdown)
+    if not rows:
+        return []
+
+    aliases = _dimension_column_aliases(dimension)
+    values: list[str] = []
+    for row in rows:
+        for column_name, value in row.items():
+            if _normalize_key(column_name) in aliases:
+                normalized = _normalize_ranked_value(value)
+                if normalized:
+                    values.append(normalized)
+                break
+    return values
+
+
+def _parse_table_markdown(table_markdown: str) -> list[dict[str, str]]:
+    lines = [line.strip() for line in str(table_markdown or "").splitlines() if line.strip()]
+    if len(lines) < 3 or "|" not in lines[0]:
+        return []
+
+    headers = [cell.strip() for cell in lines[0].strip("|").split("|")]
+    if not headers:
+        return []
+
+    rows: list[dict[str, str]] = []
+    for raw_line in lines[2:]:
+        if "|" not in raw_line:
+            continue
+        cells = [cell.strip() for cell in raw_line.strip("|").split("|")]
+        if len(cells) != len(headers):
+            continue
+        rows.append(dict(zip(headers, cells, strict=False)))
+    return rows
+
+
+def _dimension_column_aliases(dimension: str) -> set[str]:
+    if dimension == "criticality":
+        return {"criticality", "criticality level"}
+    if dimension == "complexity":
+        return {"complexity", "complexity level"}
+    return {"risk class", "risk classification", "overall risk classification", "classification"}
+
+
+def _normalize_key(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _normalize_ranked_value(value: str) -> str | None:
+    normalized = re.sub(r"[^a-z]+", " ", str(value or "").strip().lower())
+    tokens = [token for token in normalized.split() if token]
+    for token in tokens:
+        if token in CONSISTENCY_LABEL_RANKS:
+            return token
+    return None
+
+
+def _derive_max_ranked_value(values: list[str]) -> str | None:
+    ranked_values = [value for value in values if value in CONSISTENCY_LABEL_RANKS]
+    if not ranked_values:
+        return None
+    return max(ranked_values, key=lambda item: CONSISTENCY_LABEL_RANKS[item])
+
+
+def _extract_ranked_claim_value(
+    *,
+    prose_text: str,
+    dimension: str,
+    claim_type: str,
+) -> str | None:
+    dimension_pattern = re.escape(dimension).replace(r"\ ", r"\s+")
+    if claim_type == "highest":
+        patterns = (
+            rf"highest(?:\s+observed)?(?:\s+major\s+system\s+function|\s+system\s+function|\s+function)?\s+{dimension_pattern}(?:\s+level)?(?:[^a-z]{{0,30}})?(?:is|:)\s+(low|medium|high|critical)\b",
+            rf"highest(?:[^a-z]{{0,30}}){dimension_pattern}(?:\s+level)?(?:[^a-z]{{0,30}})?\b(low|medium|high|critical)\b",
+        )
+    else:
+        patterns = (
+            rf"overall(?:\s+system)?\s+{dimension_pattern}(?:\s+level|\s+classification|\s+class|\s+risk\s+level)?(?:[^a-z]{{0,30}})?(?:is|:)\s+(low|medium|high|critical)\b",
+            rf"combining\s+overall\s+{dimension_pattern}\s+(low|medium|high|critical)\b",
+        )
+
+    for pattern in patterns:
+        match = re.search(pattern, prose_text, flags=re.IGNORECASE)
+        if match:
+            return _normalize_ranked_value(match.group(1))
+    return None
 
 
 def _coverage_percent_to_status(requirement_coverage_percent: int) -> str:
