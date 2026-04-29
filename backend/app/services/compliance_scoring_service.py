@@ -39,6 +39,8 @@ def _enrich_finding(
     effective_weight = weight if weight is not None else _compute_weight(finding.requirement)
     expected_evidence_breadth = _coerce_expected_evidence_breadth(deliverable_meta)
     material_element_count = _estimate_material_element_count(finding.requirement)
+    llm_status = finding.llm_status or finding.status
+    nli_status = finding.nli_status or llm_status
     adjusted_status = _apply_structural_breadth_threshold(
         status=finding.status,
         evidence_breadth=finding.evidence_breadth,
@@ -64,6 +66,9 @@ def _enrich_finding(
     return normalized_finding.model_copy(
         update={
             "status": final_status,
+            "llm_status": llm_status,
+            "nli_status": nli_status,
+            "final_metric_status": final_status,
             "evidence_strength": evidence_strength,
             "weight": effective_weight,
             "material_element_count": material_element_count,
@@ -101,7 +106,7 @@ def _compute_evidence_strength(
     *,
     material_element_count: int,
 ) -> float:
-    evidence_count = sum(1 for item in finding.evidence_items if item.source_document)
+    evidence_count = _count_supportive_grounded_evidence(finding)
     grounded_evidence_count = evidence_count if finding.evidence_items else (
         min(max(len(finding.evidence), 0), 1) if finding.evidence and finding.source_document else 0
     )
@@ -159,7 +164,7 @@ def _compute_requirement_coverage_percent(
     finding: ComplianceFinding,
     material_element_count: int,
 ) -> int:
-    evidence_count = sum(1 for item in finding.evidence_items if item.source_document)
+    evidence_count = _count_supportive_grounded_evidence(finding)
     grounded_count = evidence_count if finding.evidence_items else (
         min(max(len(finding.evidence), 0), 1) if finding.evidence and finding.source_document else 0
     )
@@ -186,3 +191,11 @@ def _derive_status_from_requirement_coverage_percent(
     if requirement_coverage_percent >= 20:
         return "partial"
     return "not_satisfied"
+
+
+def _count_supportive_grounded_evidence(finding: ComplianceFinding) -> int:
+    return sum(
+        1
+        for item in finding.evidence_items
+        if item.source_document
+    )

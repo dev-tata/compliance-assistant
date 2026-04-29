@@ -23,6 +23,7 @@ from app.services.document_service import current_timestamp
 from app.services.llm.errors import LLMGenerationError
 from app.services.llm.factory import get_llm_service
 from app.services.llm.json_utils import extract_json_object
+from app.services.nli.evidence_contradiction_service import apply_evidence_contradiction_verification
 from app.services.retrieval.faiss_retrieval import normalize_whitespace
 from app.services.storage_paths import get_case_compliance_dir
 
@@ -118,13 +119,8 @@ def build_shared_output_instructions(
     *,
     single_requirement: bool = False,
     include_feedback: bool = False,
-    llm_sets_status: bool = False,
 ) -> list[str]:
-    linked_row_shape = (
-        '"linked_rows":[{"requirement_ref":"REQ-1","rationale":"short traceability rationale","gap":"brief missing point","recommendation":"brief corrective action"}],'
-        if include_feedback
-        else '"linked_rows":[{"requirement_ref":"REQ-1","rationale":"short traceability rationale"}],'
-    )
+    linked_row_shape = '"linked_rows":[{"requirement_ref":"REQ-1","rationale":"short traceability rationale"}],'
     output_structure = [
         "{",
         linked_row_shape,
@@ -145,16 +141,8 @@ def build_shared_output_instructions(
         "Assessment guidance:",
         "- Break each requirement into the concrete elements it requires.",
         "- Check each element against admissible evidence only.",
-        (
-            "- You must assign the compliance status yourself from the admissible evidence and any explicit contradictions present in the record."
-            if llm_sets_status
-            else "- The backend will derive compliance status from the grounded evidence you return."
-        ),
-        (
-            "- Your job is to return grounded evidence, the source document, status, and a short rationale describing how well the record supports the requirement."
-            if llm_sets_status
-            else "- Your job is to return grounded evidence, the source document, and a short rationale describing how well the record supports the requirement."
-        ),
+        "- The backend will derive compliance status from the grounded evidence you return.",
+        "- Your job is to return grounded evidence, the source document, and a short rationale describing how well the record supports the requirement.",
         "- Prefer substance over exact wording, but require the record evidence to establish the required point clearly. Treat equivalent wording or structured evidence conservatively unless it directly covers the required element.",
         "- Do not require a specific record layout, heading name, table shape, or wording pattern unless the requirement explicitly requires it.",
         "- Do not penalize a record merely because evidence appears in a different section, format, or phrasing than the procedure text.",
@@ -185,16 +173,8 @@ def build_shared_output_instructions(
         ),
         "- Every procedure_to_record.source_document value must refer only to a record document filename from this case.",
         "- For every requirement, set linked_rows.rationale to one short plain-text sentence grounded in the admissible record evidence.",
-        (
-            "- For partial or not_satisfied requirements, also provide linked_rows.gap and linked_rows.recommendation as short plain-text feedback grounded in the admissible record evidence."
-            if include_feedback
-            else "- Do not generate gaps, recommendations, or recommended_actions."
-        ),
-        (
-            "- For satisfied requirements, linked_rows.gap and linked_rows.recommendation should be empty."
-            if include_feedback
-            else "- Do not generate status fields in linked_rows."
-        ),
+        "- Do not generate gaps, recommendations, or recommended_actions.",
+        "- Do not generate status fields in linked_rows.",
         "- Do not include findings in the model output. The backend will derive findings from procedure_to_record.",
         "Return JSON with exactly this structure:",
         *output_structure,
@@ -235,13 +215,11 @@ def build_compliance_prompt(
     instructions: str | None,
     single_requirement: bool = False,
     include_feedback: bool = False,
-    llm_sets_status: bool = False,
 ) -> str:
     prompt_parts = [
         *build_shared_output_instructions(
             single_requirement=single_requirement,
             include_feedback=include_feedback,
-            llm_sets_status=llm_sets_status,
         ),
         "Input payload notes:",
         "- The payload contains the requirement list plus method-specific context blocks.",
@@ -384,7 +362,6 @@ def build_single_requirement_prompt(
     requirement_payload: dict[str, Any],
     instructions: str | None,
     include_feedback: bool = False,
-    llm_sets_status: bool = False,
 ) -> str:
     return build_compliance_prompt(
         method=method,
@@ -392,7 +369,6 @@ def build_single_requirement_prompt(
         instructions=instructions,
         single_requirement=True,
         include_feedback=include_feedback,
-        llm_sets_status=llm_sets_status,
     )
 
 
@@ -402,7 +378,6 @@ def parse_compliance_analysis_response(
     method: str,
     expected_count: int,
     allowed_record_documents: set[str] | None = None,
-    preserve_status: bool = False,
 ) -> ComplianceAnalysis:
     try:
         analysis = ComplianceAnalysis(**extract_json_object(raw_analysis))
@@ -413,7 +388,6 @@ def parse_compliance_analysis_response(
         method=method,
         expected_count=expected_count,
         allowed_record_documents=allowed_record_documents,
-        preserve_status=preserve_status,
     )
 
 
@@ -423,7 +397,6 @@ def normalize_compliance_analysis(
     method: str,
     expected_count: int,
     allowed_record_documents: set[str] | None = None,
-    preserve_status: bool = False,
 ) -> ComplianceAnalysis:
     validate_analysis_cardinality(
         analysis=analysis,
@@ -436,7 +409,6 @@ def normalize_compliance_analysis(
         analysis = _normalize_analysis_source_document(
             analysis=analysis,
             allowed_record_documents=allowed_record_documents,
-            preserve_status=preserve_status,
         )
     if analysis.linked_rows:
         analysis = analysis.model_copy(
@@ -462,14 +434,12 @@ def evaluate_single_requirement(
     instructions: str | None,
     temperature: float = 0.0,
     include_feedback: bool = False,
-    llm_sets_status: bool = False,
 ) -> ComplianceAnalysis:
     prompt = build_single_requirement_prompt(
         method=method,
         requirement_payload=requirement_payload,
         instructions=instructions,
         include_feedback=include_feedback,
-        llm_sets_status=llm_sets_status,
     )
     return parse_compliance_analysis_response(
         raw_analysis=llm_service.generate(prompt, temperature=temperature),
@@ -522,8 +492,8 @@ def normalize_requirement_linked_row(
         requirement=row.requirement if row and row.requirement else finding.requirement,
         status=finding.status,
         rationale=row.rationale if row and row.rationale else "",
-        gap="" if finding.status == "satisfied" else finding.requirement,
-        recommendation="" if finding.status == "satisfied" else recommended_action_for_requirement(finding.requirement),
+        gap="",
+        recommendation="",
     )
 
 
@@ -625,24 +595,8 @@ def build_linked_rows_from_findings(
                 status=finding.status,
                 rationale=(existing_row.rationale if existing_row and existing_row.rationale else ""),
                 record_recall_at_k=(existing_row.record_recall_at_k if existing_row else None),
-                gap=(
-                    ""
-                    if finding.status == "satisfied"
-                    else (
-                        existing_row.gap
-                        if existing_row and existing_row.gap
-                        else finding.requirement
-                    )
-                ),
-                recommendation=(
-                    ""
-                    if finding.status == "satisfied"
-                    else (
-                        sanitize_compliance_recommendation(existing_row.recommendation)
-                        if existing_row and existing_row.recommendation
-                        else recommended_action_for_requirement(finding.requirement)
-                    )
-                ),
+                gap="",
+                recommendation="",
             )
         )
     return resolved_rows
@@ -664,12 +618,8 @@ def assemble_compliance_analysis(
         linked_rows=resolved_rows,
         findings=findings,
         procedure_to_record=findings,
-        gaps=[row.gap for row in resolved_rows if row.status != "satisfied" and row.gap],
-        recommended_actions=[
-            row.recommendation
-            for row in resolved_rows
-            if row.status != "satisfied" and row.recommendation
-        ],
+        gaps=[],
+        recommended_actions=[],
     )
     return apply_computed_analysis_metrics(analysis)
 
@@ -737,7 +687,7 @@ def verify_finding_against_retrieved_sections(
             ],
         }
     )
-    return _apply_evidence_thresholds(verified)
+    return apply_evidence_contradiction_verification(_apply_evidence_thresholds(verified))
 
 
 def verify_finding_against_full_record_sections(
@@ -766,7 +716,7 @@ def verify_finding_against_full_record_sections(
             ],
         }
     )
-    return _apply_evidence_thresholds(verified)
+    return apply_evidence_contradiction_verification(_apply_evidence_thresholds(verified))
 
 
 def evidence_supported_by_sections(evidence: str, sections: list[dict[str, Any]]) -> bool:
@@ -889,13 +839,11 @@ def _normalize_analysis_source_document(
     *,
     analysis: ComplianceAnalysis,
     allowed_record_documents: set[str],
-    preserve_status: bool = False,
 ) -> ComplianceAnalysis:
     normalized_procedure_to_record = [
         _normalize_finding_source_document(
             finding=finding,
             allowed_record_documents=allowed_record_documents,
-            preserve_status=preserve_status,
         )
         for finding in analysis.procedure_to_record
     ]
@@ -903,7 +851,6 @@ def _normalize_analysis_source_document(
         _normalize_finding_source_document(
             finding=finding,
             allowed_record_documents=allowed_record_documents,
-            preserve_status=preserve_status,
         )
         for finding in analysis.findings
     ]
@@ -919,7 +866,6 @@ def _normalize_finding_source_document(
     *,
     finding: ComplianceFinding,
     allowed_record_documents: set[str],
-    preserve_status: bool = False,
 ) -> ComplianceFinding:
     normalized_evidence = normalize_string_list(finding.evidence)
     if not normalized_evidence:
@@ -930,7 +876,7 @@ def _normalize_finding_source_document(
                 "evidence_items": [],
             }
         )
-        return _apply_evidence_thresholds(normalized, preserve_status=preserve_status)
+        return _apply_evidence_thresholds(normalized)
     normalized = finding.model_copy(
         update={
             "evidence": normalized_evidence,
@@ -952,14 +898,10 @@ def _normalize_finding_source_document(
             ],
         }
     )
-    return _apply_evidence_thresholds(normalized, preserve_status=preserve_status)
+    return apply_evidence_contradiction_verification(_apply_evidence_thresholds(normalized))
 
 
-def _apply_evidence_thresholds(
-    finding: ComplianceFinding,
-    *,
-    preserve_status: bool = False,
-) -> ComplianceFinding:
+def _apply_evidence_thresholds(finding: ComplianceFinding) -> ComplianceFinding:
     evidence = normalize_string_list(finding.evidence)
     source_document = normalize_whitespace(finding.source_document)
     evidence_items = (
@@ -980,21 +922,25 @@ def _apply_evidence_thresholds(
     grounded_count = sum(
         1
         for item in evidence_items
-        if normalize_whitespace(item.text) and normalize_whitespace(item.source_document)
+        if (
+            normalize_whitespace(item.text)
+            and normalize_whitespace(item.source_document)
+            and item.supports_requirement
+        )
     )
 
-    next_status = (
-        finding.status
-        if preserve_status and grounded_count > 0 and bool(source_document)
-        else _derive_status_from_grounded_evidence(
-            requirement=finding.requirement,
-            grounded_count=grounded_count,
-            has_source_document=bool(source_document),
-        )
+    next_status = _derive_status_from_grounded_evidence(
+        requirement=finding.requirement,
+        grounded_count=grounded_count,
+        has_source_document=bool(source_document),
     )
 
     return finding.model_copy(
         update={
+            "llm_status": finding.llm_status or next_status,
+            "nli_status": finding.nli_status or next_status,
+            "final_metric_status": finding.final_metric_status or next_status,
+            "pre_verification_status": finding.pre_verification_status or next_status,
             "status": next_status,
             "evidence": evidence,
             "source_document": source_document,
@@ -1114,23 +1060,16 @@ def _sanitize_linked_row_recommendation(row: ComplianceLinkedRow) -> ComplianceL
 
 
 def _build_linked_rows(analysis: ComplianceAnalysis) -> list[ComplianceLinkedRow]:
-    gaps = list(analysis.gaps)
-    recommendations = list(analysis.recommended_actions)
     linked_rows: list[ComplianceLinkedRow] = []
     for index, finding in enumerate(analysis.procedure_to_record):
-        gap = ""
-        recommendation = ""
-        if finding.status != "satisfied":
-            gap = gaps.pop(0) if gaps else ""
-            recommendation = recommendations.pop(0) if recommendations else ""
         linked_rows.append(
             ComplianceLinkedRow(
                 requirement_ref=f"REQ-{index + 1}",
                 requirement=finding.requirement,
                 status=finding.status,
                 rationale="",
-                gap=gap,
-                recommendation=recommendation,
+                gap="",
+                recommendation="",
             )
         )
     return linked_rows

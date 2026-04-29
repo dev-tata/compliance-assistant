@@ -180,26 +180,12 @@ def _run_stage_1_non_rag(
             "records": [
                 simplify_document_for_prompt(document) for document in case_payload.get("records", [])
             ],
-            "workflow_rules": [
-                "Treat explicit contradictions inside the record as material non-compliance findings, not as satisfied support.",
-                "If a table-derived highest or overall value conflicts with a recorded overall statement, reflect that contradiction directly in the status, rationale, gap, and recommendation.",
-                "Do not mark a requirement as satisfied when the record contains grounded evidence that the required value is inconsistent or incorrectly recorded.",
-            ],
         },
         instructions=instructions,
-        include_feedback=True,
-        llm_sets_status=True,
-    )
-    raw_analysis = llm_service.generate(prompt, temperature=0.0)
-    model_analysis = parse_compliance_analysis_response(
-        raw_analysis=raw_analysis,
-        method="non_rag",
-        expected_count=len(deliverables),
-        allowed_record_documents=allowed_record_documents,
-        preserve_status=True,
+        include_feedback=False,
     )
     analysis = parse_compliance_analysis_response(
-        raw_analysis=raw_analysis,
+        raw_analysis=llm_service.generate(prompt, temperature=0.0),
         method="non_rag",
         expected_count=len(deliverables),
         allowed_record_documents=allowed_record_documents,
@@ -219,10 +205,6 @@ def _run_stage_1_non_rag(
         analysis,
         requirement_weights=_extract_deliverable_weights(deliverables),
         deliverable_metadata=deliverables,
-    )
-    analysis = _restore_model_judgement_floor(
-        candidate_analysis=analysis,
-        model_analysis=model_analysis,
     )
     analysis = assemble_compliance_analysis(
         findings=analysis.procedure_to_record or analysis.findings,
@@ -261,7 +243,7 @@ def _run_stage_2_record_retrieval(
                 retrieved_payload=retrieved_payload,
                 include_reference_context=False,
                 include_baseline=False,
-                include_feedback=True,
+                include_feedback=False,
             ),
             "workflow_rules": [
                 "Treat the original deliverable as the canonical requirement source.",
@@ -270,7 +252,7 @@ def _run_stage_2_record_retrieval(
             ],
         },
         instructions=instructions,
-        include_feedback=True,
+        include_feedback=False,
     )
     raw_analysis = parse_compliance_analysis_response(
         raw_analysis=llm_service.generate(prompt, temperature=0.0),
@@ -320,7 +302,7 @@ def _run_stage_3_reference_retrieval(
                 retrieved_payload=retrieved_payload,
                 include_reference_context=True,
                 include_baseline=False,
-                include_feedback=True,
+                include_feedback=False,
             ),
             "workflow_rules": [
                 "Treat the original deliverable as the canonical requirement source.",
@@ -331,7 +313,7 @@ def _run_stage_3_reference_retrieval(
             ],
         },
         instructions=instructions,
-        include_feedback=True,
+        include_feedback=False,
     )
     raw_analysis = parse_compliance_analysis_response(
         raw_analysis=llm_service.generate(prompt, temperature=0.0),
@@ -594,15 +576,11 @@ def _tag_analysis_evidence(
     tagged = [
         finding.model_copy(
             update={
-                "evidence_items": [
-                    ComplianceEvidenceItem(
-                        text=evidence,
-                        source_document=finding.source_document,
-                        stage_key=stage_key,
-                        stage_label=stage_label,
-                    )
-                    for evidence in finding.evidence
-                ]
+                "evidence_items": _retag_existing_evidence_items(
+                    finding=finding,
+                    stage_key=stage_key,
+                    stage_label=stage_label,
+                )
             }
         )
         for finding in findings
@@ -617,16 +595,19 @@ def _tag_finding_evidence(
     stage_key: str,
     stage_label: str,
 ) -> ComplianceFinding:
+    current_items = _build_evidence_item_lookup(finding.evidence_items)
     inherited = _build_evidence_item_lookup(previous_finding.evidence_items)
     evidence_items: list[ComplianceEvidenceItem] = []
     for evidence in finding.evidence:
         normalized = _normalize_evidence_key(evidence)
-        existing = inherited.get(normalized)
+        existing = current_items.get(normalized) or inherited.get(normalized)
         if existing is not None:
             evidence_items.append(
                 existing.model_copy(
                     update={
                         "source_document": finding.source_document or existing.source_document,
+                        "stage_key": stage_key,
+                        "stage_label": stage_label,
                     }
                 )
             )
@@ -640,6 +621,35 @@ def _tag_finding_evidence(
                 )
             )
     return finding.model_copy(update={"evidence_items": evidence_items})
+
+
+def _retag_existing_evidence_items(
+    *,
+    finding: ComplianceFinding,
+    stage_key: str,
+    stage_label: str,
+) -> list[ComplianceEvidenceItem]:
+    if finding.evidence_items:
+        return [
+            item.model_copy(
+                update={
+                    "stage_key": stage_key,
+                    "stage_label": stage_label,
+                    "source_document": finding.source_document or item.source_document,
+                }
+            )
+            for item in finding.evidence_items
+            if _normalize_evidence_key(item.text)
+        ]
+    return [
+        ComplianceEvidenceItem(
+            text=evidence,
+            source_document=finding.source_document,
+            stage_key=stage_key,
+            stage_label=stage_label,
+        )
+        for evidence in finding.evidence
+    ]
 
 
 def _merge_finding_evidence(
@@ -775,116 +785,6 @@ def _status_rank(status: str) -> int:
         "satisfied": 2,
     }
     return order.get(status, -1)
-
-
-def _restore_model_judgement_floor(
-    *,
-    candidate_analysis: ComplianceAnalysis,
-    model_analysis: ComplianceAnalysis,
-) -> ComplianceAnalysis:
-    candidate_findings = candidate_analysis.procedure_to_record or candidate_analysis.findings
-    candidate_rows = candidate_analysis.linked_rows
-    model_findings = model_analysis.procedure_to_record or model_analysis.findings
-    model_rows = model_analysis.linked_rows
-
-    restored_findings: list[ComplianceFinding] = []
-    restored_rows: list[ComplianceLinkedRow] = []
-    for index, candidate_finding in enumerate(candidate_findings):
-        model_finding = model_findings[index] if index < len(model_findings) else None
-        model_row = model_rows[index] if index < len(model_rows) else None
-        candidate_row = candidate_rows[index] if index < len(candidate_rows) else None
-
-        if (
-            model_finding is None
-            or _status_rank(model_finding.status) >= _status_rank(candidate_finding.status)
-            or not _should_preserve_contradiction_judgement(model_row)
-        ):
-            restored_findings.append(candidate_finding)
-            restored_rows.append(candidate_row if candidate_row is not None else model_row)
-            continue
-
-        restored_findings.append(
-            _align_finding_scores_to_status(
-                candidate_finding.model_copy(
-                    update={
-                        "status": model_finding.status,
-                    }
-                )
-            )
-        )
-        restored_rows.append(
-            (candidate_row if candidate_row is not None else model_row).model_copy(
-                update={
-                    "status": model_finding.status,
-                    "rationale": model_row.rationale if model_row else (candidate_row.rationale if candidate_row else ""),
-                    "gap": model_row.gap if model_row else (candidate_row.gap if candidate_row else ""),
-                    "recommendation": (
-                        model_row.recommendation
-                        if model_row
-                        else (candidate_row.recommendation if candidate_row else "")
-                    ),
-                }
-            )
-            if (candidate_row is not None or model_row is not None)
-            else ComplianceLinkedRow(
-                requirement_ref=f"REQ-{index + 1}",
-                requirement=candidate_finding.requirement,
-                status=model_finding.status,
-                rationale="",
-                gap="",
-                recommendation="",
-            )
-        )
-
-    return candidate_analysis.model_copy(
-        update={
-            "procedure_to_record": restored_findings,
-            "findings": restored_findings,
-            "linked_rows": restored_rows,
-        }
-    )
-
-
-def _should_preserve_contradiction_judgement(row: ComplianceLinkedRow | None) -> bool:
-    rationale = normalize_whitespace(row.rationale if row else "").lower()
-    if not rationale:
-        return False
-    contradiction_markers = (
-        "does not match",
-        "do not match",
-        "mismatch",
-        "conflict",
-        "conflicts with",
-        "contradict",
-        "contradiction",
-        "inconsistent",
-        "incorrectly states",
-        "incorrectly records",
-        "incorrectly classified",
-        "highest criticality as",
-        "highest observed function criticality",
-        "highest function criticality",
-        "but the",
-    )
-    return any(marker in rationale for marker in contradiction_markers)
-
-
-def _align_finding_scores_to_status(finding: ComplianceFinding) -> ComplianceFinding:
-    if finding.status == "satisfied":
-        return finding
-    if finding.status == "partial":
-        return finding.model_copy(
-            update={
-                "requirement_coverage_percent": min(int(finding.requirement_coverage_percent or 0), 49),
-                "evidence_strength": min(float(finding.evidence_strength or 0.0), 0.49),
-            }
-        )
-    return finding.model_copy(
-        update={
-            "requirement_coverage_percent": 0,
-            "evidence_strength": min(float(finding.evidence_strength or 0.0), 0.19),
-        }
-    )
 
 
 def _select_requirement_merge_mode(

@@ -70,6 +70,34 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
+function formatFindingStatusLine(
+  finding: ComplianceResponse["analysis"]["findings"][number],
+): string {
+  return escapeHtml(finding.final_metric_status || finding.status);
+}
+
+function findingHasContradictionStatusChange(
+  finding: ComplianceResponse["analysis"]["findings"][number],
+): boolean {
+  return Boolean(
+    finding.contradiction_override_applied
+    && finding.llm_status
+    && finding.nli_status
+    && finding.llm_status !== finding.nli_status,
+  );
+}
+
+function formatContradictionStatusLine(
+  finding: ComplianceResponse["analysis"]["findings"][number],
+): string {
+  if (!finding.llm_status || !finding.nli_status) {
+    return "";
+  }
+  const before = escapeHtml(finding.llm_status);
+  const after = escapeHtml(finding.nli_status);
+  return before === after ? before : `${before} → ${after}`;
+}
+
 function renderLinkedRows(
   rows: ComplianceResponse["analysis"]["linked_rows"],
   procedureToRecord: ComplianceResponse["analysis"]["procedure_to_record"] | ComplianceResponse["analysis"]["findings"],
@@ -86,14 +114,17 @@ function renderLinkedRows(
   }
 
   return rows.map((row, index) => {
-    const evidenceStrength = procedureToRecord?.[index]?.evidence_strength;
-    const coverage = procedureToRecord?.[index]?.requirement_coverage_percent;
+    const finding = procedureToRecord?.[index];
+    const evidenceStrength = finding?.evidence_strength;
+    const coverage = finding?.requirement_coverage_percent;
     const evidenceStrengthLabel = typeof evidenceStrength === "number"
       ? `${(evidenceStrength * 100).toFixed(1)}%`
       : "&mdash;";
     const coverageLabel = typeof coverage === "number"
       ? `${coverage}%`
       : "&mdash;";
+    const statusChange = finding ? findingHasContradictionStatusChange(finding) : false;
+    const contradictionDetected = Boolean(finding?.contradiction_detected);
     return `
     <tr>
       <td>${index + 1}</td>
@@ -103,7 +134,11 @@ function renderLinkedRows(
       </td>
       <td>${evidenceStrengthLabel}</td>
       <td>${coverageLabel}</td>
-      <td>${escapeHtml(row.status) || "&mdash;"}</td>
+      <td>
+        <div>${finding ? formatFindingStatusLine(finding) : (escapeHtml(row.status) || "&mdash;")}</div>
+        ${statusChange && finding ? `<div class="status-change-note status-change-note-danger">NLI contradiction: ${formatContradictionStatusLine(finding)}</div>` : ""}
+        ${contradictionDetected && !statusChange ? `<div class="status-change-note status-change-note-danger">Contradiction detected</div>` : ""}
+      </td>
     </tr>
   `;
   }).join("");
@@ -247,6 +282,7 @@ function renderEvidenceList(
     <li>
       ${escapeHtml(item.text)}
       ${item.stage_label ? ` <span class="evidence-stage">${escapeHtml(item.stage_label)}</span>` : ""}
+      ${item.nli_relation ? ` <span class="evidence-stage evidence-stage-nli ${item.nli_relation === "contradiction" ? "evidence-stage-nli-contradiction" : ""}">NLI: ${escapeHtml(item.nli_relation)}</span>` : ""}
     </li>
   `).join("");
 }
@@ -269,7 +305,11 @@ function renderRequirementEvaluations(
             <strong>${escapeHtml(finding.requirement)}</strong>
           </div>
           <div class="finding-header-meta">
-            <span class="status status-${escapeHtml(finding.status)}">${escapeHtml(finding.status)}</span>
+            <div class="finding-status-stack">
+              <span class="status status-${escapeHtml(finding.status)}">${formatFindingStatusLine(finding)}</span>
+              ${findingHasContradictionStatusChange(finding) ? `<span class="status-change-note status-change-note-danger">NLI contradiction: ${formatContradictionStatusLine(finding)}</span>` : ""}
+              ${finding.contradiction_detected && !findingHasContradictionStatusChange(finding) ? `<span class="status-change-note status-change-note-danger">Contradiction detected</span>` : ""}
+            </div>
             ${recallLabel ? `<span class="finding-recall">${escapeHtml(recallLabel)}</span>` : ""}
           </div>
         </header>
@@ -277,6 +317,7 @@ function renderRequirementEvaluations(
           <span><strong>Source:</strong> ${escapeHtml(finding.source_document || "none")}</span>
           <span><strong>Evidence strength:</strong> ${(finding.evidence_strength * 100).toFixed(1)}% · <strong>Weight:</strong> ${finding.weight.toFixed(1)} · <strong>Coverage:</strong> ${finding.requirement_coverage_percent}%</span>
         </div>
+        ${finding.verification_notes?.length ? `<div class="finding-verification-notes"><strong>NLI:</strong> ${escapeHtml(finding.verification_notes.join(" "))}</div>` : ""}
         <ul>${renderEvidenceList(finding)}</ul>
       </article>
     `;
@@ -493,6 +534,17 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
             text-transform: uppercase;
             letter-spacing: 0.03em;
           }
+          .evidence-stage-nli {
+            padding: 0;
+            border-radius: 0;
+            background: transparent;
+            color: #6b5b4d;
+            font-weight: 500;
+          }
+          .evidence-stage-nli-contradiction {
+            color: #9b2226;
+            font-weight: 700;
+          }
           .evidence-flag {
             display: inline-block;
             margin-left: 6px;
@@ -534,6 +586,10 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
           .status-satisfied { background: #d7f1df; color: #2d6a4f; }
           .status-partial { background: #fff1cf; color: #b7791f; }
           .status-not_satisfied { background: #ffdedd; color: #9b2226; }
+          .finding-status-stack { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+          .status-change-note { font-size: 0.72rem; color: #6b5b4d; }
+          .status-change-note-danger { color: #9b2226; font-weight: 600; }
+          .finding-verification-notes { margin-top: 8px; font-size: 0.82rem; color: #5c4b3f; }
           @media (max-width: 900px) {
             .head { grid-template-columns: 1fr; }
             .assessment {

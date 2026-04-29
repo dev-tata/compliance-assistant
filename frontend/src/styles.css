@@ -849,6 +849,42 @@ textarea {
   color: var(--danger);
 }
 
+.finding-status-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.status-change-note {
+  font-size: 0.72rem;
+  color: #6b5b4d;
+}
+
+.status-change-note-danger {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.finding-verification-notes {
+  margin-top: 8px;
+  font-size: 0.82rem;
+  color: #5c4b3f;
+}
+
+.evidence-stage-nli {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #6b5b4d;
+  font-weight: 500;
+}
+
+.evidence-stage-nli-contradiction {
+  color: var(--danger);
+  font-weight: 700;
+}
+
 .preview {
   margin: 0;
   max-height: 360px;
