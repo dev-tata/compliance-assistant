@@ -1,3 +1,0 @@
-from app.services.nli.evidence_contradiction_service import apply_evidence_contradiction_verification
-
-__all__ = ["apply_evidence_contradiction_verification"]

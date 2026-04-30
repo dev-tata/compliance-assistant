@@ -23,7 +23,6 @@ from app.services.document_service import current_timestamp
 from app.services.llm.errors import LLMGenerationError
 from app.services.llm.factory import get_llm_service
 from app.services.llm.json_utils import extract_json_object
-from app.services.nli.evidence_contradiction_service import apply_evidence_contradiction_verification
 from app.services.retrieval.faiss_retrieval import normalize_whitespace
 from app.services.storage_paths import get_case_compliance_dir
 
@@ -687,7 +686,7 @@ def verify_finding_against_retrieved_sections(
             ],
         }
     )
-    return apply_evidence_contradiction_verification(_apply_evidence_thresholds(verified))
+    return _apply_evidence_thresholds(verified)
 
 
 def verify_finding_against_full_record_sections(
@@ -716,7 +715,7 @@ def verify_finding_against_full_record_sections(
             ],
         }
     )
-    return apply_evidence_contradiction_verification(_apply_evidence_thresholds(verified))
+    return _apply_evidence_thresholds(verified)
 
 
 def evidence_supported_by_sections(evidence: str, sections: list[dict[str, Any]]) -> bool:
@@ -898,7 +897,7 @@ def _normalize_finding_source_document(
             ],
         }
     )
-    return apply_evidence_contradiction_verification(_apply_evidence_thresholds(normalized))
+    return _apply_evidence_thresholds(normalized)
 
 
 def _apply_evidence_thresholds(finding: ComplianceFinding) -> ComplianceFinding:
@@ -925,7 +924,6 @@ def _apply_evidence_thresholds(finding: ComplianceFinding) -> ComplianceFinding:
         if (
             normalize_whitespace(item.text)
             and normalize_whitespace(item.source_document)
-            and item.supports_requirement
         )
     )
 
@@ -937,10 +935,6 @@ def _apply_evidence_thresholds(finding: ComplianceFinding) -> ComplianceFinding:
 
     return finding.model_copy(
         update={
-            "llm_status": finding.llm_status or next_status,
-            "nli_status": finding.nli_status or next_status,
-            "final_metric_status": finding.final_metric_status or next_status,
-            "pre_verification_status": finding.pre_verification_status or next_status,
             "status": next_status,
             "evidence": evidence,
             "source_document": source_document,

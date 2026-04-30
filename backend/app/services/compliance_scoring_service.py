@@ -39,8 +39,6 @@ def _enrich_finding(
     effective_weight = weight if weight is not None else _compute_weight(finding.requirement)
     expected_evidence_breadth = _coerce_expected_evidence_breadth(deliverable_meta)
     material_element_count = _estimate_material_element_count(finding.requirement)
-    llm_status = finding.llm_status or finding.status
-    nli_status = finding.nli_status or llm_status
     adjusted_status = _apply_structural_breadth_threshold(
         status=finding.status,
         evidence_breadth=finding.evidence_breadth,
@@ -66,9 +64,6 @@ def _enrich_finding(
     return normalized_finding.model_copy(
         update={
             "status": final_status,
-            "llm_status": llm_status,
-            "nli_status": nli_status,
-            "final_metric_status": final_status,
             "evidence_strength": evidence_strength,
             "weight": effective_weight,
             "material_element_count": material_element_count,

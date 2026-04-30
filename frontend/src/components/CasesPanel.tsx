@@ -1,4 +1,4 @@
-import type { CaseDocuments, CaseRecord, DocumentRecord } from "../types";
+import type { CaseDocuments, CaseRecord } from "../types";
 import { formatDateTime } from "../utils/formatDateTime";
 
 type ExtractionInfo = {

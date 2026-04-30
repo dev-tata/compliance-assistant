@@ -76,11 +76,6 @@ export type ComplianceStatus = "satisfied" | "partial" | "not_satisfied";
 export type ComplianceFinding = {
   requirement: string;
   status: ComplianceStatus;
-  llm_status?: ComplianceStatus | null;
-  nli_status?: ComplianceStatus | null;
-  final_metric_status?: ComplianceStatus | null;
-  pre_verification_status?: ComplianceStatus | null;
-  contradiction_status_before?: ComplianceStatus | null;
   evidence: string[];
   source_document: string;
   evidence_items?: ComplianceEvidenceItem[];
@@ -90,13 +85,6 @@ export type ComplianceFinding = {
   requirement_coverage_percent: number;
   evidence_breadth: number;
   expected_evidence_breadth: number;
-  contradiction_detected?: boolean;
-  contradiction_evidence_count?: number;
-  supporting_evidence_count?: number;
-  neutral_evidence_count?: number;
-  verification_applied?: boolean;
-  contradiction_override_applied?: boolean;
-  verification_notes?: string[];
 };
 
 export type ComplianceEvidenceItem = {
@@ -104,9 +92,6 @@ export type ComplianceEvidenceItem = {
   source_document: string;
   stage_key?: string | null;
   stage_label?: string | null;
-  nli_relation?: string | null;
-  nli_score?: number | null;
-  supports_requirement?: boolean;
 };
 
 export type ComplianceLinkedRow = {

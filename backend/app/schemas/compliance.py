@@ -41,11 +41,6 @@ class ComplianceRequest(BaseModel):
 class ComplianceFinding(BaseModel):
     requirement: str
     status: ComplianceStatus = "not_satisfied"
-    llm_status: ComplianceStatus | None = None
-    nli_status: ComplianceStatus | None = None
-    final_metric_status: ComplianceStatus | None = None
-    pre_verification_status: ComplianceStatus | None = None
-    contradiction_status_before: ComplianceStatus | None = None
     evidence: list[str] = Field(default_factory=list)
     source_document: str = ""
     evidence_items: list["ComplianceEvidenceItem"] = Field(default_factory=list)
@@ -55,13 +50,6 @@ class ComplianceFinding(BaseModel):
     weight: float = Field(default=1.0, gt=0.0)
     material_element_count: int = Field(default=1, ge=1)
     requirement_coverage_percent: int = Field(default=0, ge=0, le=100)
-    contradiction_detected: bool = False
-    contradiction_evidence_count: int = Field(default=0, ge=0)
-    supporting_evidence_count: int = Field(default=0, ge=0)
-    neutral_evidence_count: int = Field(default=0, ge=0)
-    verification_applied: bool = False
-    contradiction_override_applied: bool = False
-    verification_notes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -87,9 +75,6 @@ class ComplianceEvidenceItem(BaseModel):
     source_document: str = ""
     stage_key: str | None = None
     stage_label: str | None = None
-    nli_relation: str | None = None
-    nli_score: float | None = Field(default=None, ge=0.0, le=1.0)
-    supports_requirement: bool = True
 
     @model_validator(mode="before")
     @classmethod

@@ -17,7 +17,6 @@ import {
   listDocuments,
   runCompliance,
   setDocumentFrozen,
-  updateCaseRecords,
   updateLatestDocumentDeliverables,
   uploadDocument,
 } from "./api";
@@ -73,29 +72,7 @@ function escapeHtml(value: string): string {
 function formatFindingStatusLine(
   finding: ComplianceResponse["analysis"]["findings"][number],
 ): string {
-  return escapeHtml(finding.final_metric_status || finding.status);
-}
-
-function findingHasContradictionStatusChange(
-  finding: ComplianceResponse["analysis"]["findings"][number],
-): boolean {
-  return Boolean(
-    finding.contradiction_override_applied
-    && finding.llm_status
-    && finding.nli_status
-    && finding.llm_status !== finding.nli_status,
-  );
-}
-
-function formatContradictionStatusLine(
-  finding: ComplianceResponse["analysis"]["findings"][number],
-): string {
-  if (!finding.llm_status || !finding.nli_status) {
-    return "";
-  }
-  const before = escapeHtml(finding.llm_status);
-  const after = escapeHtml(finding.nli_status);
-  return before === after ? before : `${before} → ${after}`;
+  return escapeHtml(finding.status);
 }
 
 function renderLinkedRows(
@@ -123,8 +100,6 @@ function renderLinkedRows(
     const coverageLabel = typeof coverage === "number"
       ? `${coverage}%`
       : "&mdash;";
-    const statusChange = finding ? findingHasContradictionStatusChange(finding) : false;
-    const contradictionDetected = Boolean(finding?.contradiction_detected);
     return `
     <tr>
       <td>${index + 1}</td>
@@ -136,8 +111,6 @@ function renderLinkedRows(
       <td>${coverageLabel}</td>
       <td>
         <div>${finding ? formatFindingStatusLine(finding) : (escapeHtml(row.status) || "&mdash;")}</div>
-        ${statusChange && finding ? `<div class="status-change-note status-change-note-danger">NLI contradiction: ${formatContradictionStatusLine(finding)}</div>` : ""}
-        ${contradictionDetected && !statusChange ? `<div class="status-change-note status-change-note-danger">Contradiction detected</div>` : ""}
       </td>
     </tr>
   `;
@@ -282,7 +255,6 @@ function renderEvidenceList(
     <li>
       ${escapeHtml(item.text)}
       ${item.stage_label ? ` <span class="evidence-stage">${escapeHtml(item.stage_label)}</span>` : ""}
-      ${item.nli_relation ? ` <span class="evidence-stage evidence-stage-nli ${item.nli_relation === "contradiction" ? "evidence-stage-nli-contradiction" : ""}">NLI: ${escapeHtml(item.nli_relation)}</span>` : ""}
     </li>
   `).join("");
 }
@@ -307,8 +279,6 @@ function renderRequirementEvaluations(
           <div class="finding-header-meta">
             <div class="finding-status-stack">
               <span class="status status-${escapeHtml(finding.status)}">${formatFindingStatusLine(finding)}</span>
-              ${findingHasContradictionStatusChange(finding) ? `<span class="status-change-note status-change-note-danger">NLI contradiction: ${formatContradictionStatusLine(finding)}</span>` : ""}
-              ${finding.contradiction_detected && !findingHasContradictionStatusChange(finding) ? `<span class="status-change-note status-change-note-danger">Contradiction detected</span>` : ""}
             </div>
             ${recallLabel ? `<span class="finding-recall">${escapeHtml(recallLabel)}</span>` : ""}
           </div>
@@ -317,7 +287,6 @@ function renderRequirementEvaluations(
           <span><strong>Source:</strong> ${escapeHtml(finding.source_document || "none")}</span>
           <span><strong>Evidence strength:</strong> ${(finding.evidence_strength * 100).toFixed(1)}% · <strong>Weight:</strong> ${finding.weight.toFixed(1)} · <strong>Coverage:</strong> ${finding.requirement_coverage_percent}%</span>
         </div>
-        ${finding.verification_notes?.length ? `<div class="finding-verification-notes"><strong>NLI:</strong> ${escapeHtml(finding.verification_notes.join(" "))}</div>` : ""}
         <ul>${renderEvidenceList(finding)}</ul>
       </article>
     `;
@@ -534,17 +503,6 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
             text-transform: uppercase;
             letter-spacing: 0.03em;
           }
-          .evidence-stage-nli {
-            padding: 0;
-            border-radius: 0;
-            background: transparent;
-            color: #6b5b4d;
-            font-weight: 500;
-          }
-          .evidence-stage-nli-contradiction {
-            color: #9b2226;
-            font-weight: 700;
-          }
           .evidence-flag {
             display: inline-block;
             margin-left: 6px;
@@ -663,7 +621,7 @@ export default function App() {
   const [extractionProvider, setExtractionProvider] = useState(FALLBACK_LLM_PROVIDERS[0]?.key ?? "openai");
   const [extractionModel, setExtractionModel] = useState(FALLBACK_LLM_PROVIDERS[0]?.default_model ?? "gpt-5.4-nano");
   const [groupId, setGroupId] = useState("");
-  const [selectedDeliverablesByDocument, setSelectedDeliverablesByDocument] = useState<SelectedDeliverablesByDocument>({});
+  const [, setSelectedDeliverablesByDocument] = useState<SelectedDeliverablesByDocument>({});
   const [deliverablePicker, setDeliverablePicker] = useState<DeliverableExtractionResponse | null>(null);
   const [editableDeliverables, setEditableDeliverables] = useState<DeliverableItem[]>([]);
   const [extractionInfoByDocument, setExtractionInfoByDocument] = useState<Record<string, { provider: string; model: string } | null>>({});
@@ -1186,28 +1144,6 @@ export default function App() {
       await refreshAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Case delete failed");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function onUpdateCaseRecords(caseId: string, recordStoredFilenames: string[]) {
-    setBusy(`update-case-records:${caseId}`);
-    setError("");
-    try {
-      const updated = await updateCaseRecords({
-        caseId,
-        recordStoredFilenames,
-      });
-      setCases((current) =>
-        current.map((item) => (item.case_id === caseId ? updated : item)),
-      );
-      if (caseDocuments?.case_id === caseId) {
-        const payload = await getCaseDocuments(caseId);
-        setCaseDocuments(payload);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Case update failed");
     } finally {
       setBusy("");
     }
