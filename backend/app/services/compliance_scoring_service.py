@@ -7,7 +7,7 @@ from app.schemas.compliance import (
     ComplianceFinding,
 )
 
-
+ # DEPRECATED: legacy scoring, not used in evaluation_v3
 def enrich_analysis_for_scoring(
     analysis: ComplianceAnalysis,
     *,
@@ -29,7 +29,7 @@ def enrich_analysis_for_scoring(
         }
     )
 
-
+ # DEPRECATED: legacy scoring, not used in evaluation_v3
 def _enrich_finding(
     finding: ComplianceFinding,
     *,
@@ -71,7 +71,7 @@ def _enrich_finding(
         }
     )
 
-
+ # DEPRECATED: legacy scoring, not used in evaluation_v3
 def _coerce_expected_evidence_breadth(deliverable_meta: dict[str, object] | None) -> int:
     if not deliverable_meta:
         return 1
@@ -80,7 +80,7 @@ def _coerce_expected_evidence_breadth(deliverable_meta: dict[str, object] | None
         return int(raw)
     return 1
 
-
+ # DEPRECATED: legacy scoring, not used in evaluation_v3
 def _apply_structural_breadth_threshold(
     *,
     status: str,
@@ -95,7 +95,7 @@ def _apply_structural_breadth_threshold(
         return status
     return status if evidence_breadth >= expected_evidence_breadth else "partial"
 
-
+ # DEPRECATED: legacy scoring, not used in evaluation_v3
 def _compute_evidence_strength(
     finding: ComplianceFinding,
     *,
@@ -133,7 +133,7 @@ def _compute_weight(requirement: str) -> float:
 
     return 1.0
 
-
+ # DEPRECATED: legacy scoring, not used in evaluation_v3
 def _estimate_material_element_count(requirement: str) -> int:
     text = " ".join(str(requirement or "").split())
     if not text:
@@ -153,7 +153,7 @@ def _estimate_material_element_count(requirement: str) -> int:
             segments = and_parts
     return max(1, min(len(segments), 5))
 
-
+ # DEPRECATED: legacy scoring, not used in evaluation_v3
 def _compute_requirement_coverage_percent(
     *,
     finding: ComplianceFinding,
@@ -176,7 +176,7 @@ def _compute_requirement_coverage_percent(
     )
     return round(100 * min(element_ratio, breadth_ratio))
 
-
+ # DEPRECATED: legacy scoring, not used in evaluation_v3
 def _derive_status_from_requirement_coverage_percent(
     *,
     requirement_coverage_percent: int,
@@ -187,7 +187,7 @@ def _derive_status_from_requirement_coverage_percent(
         return "partial"
     return "not_satisfied"
 
-
+ # DEPRECATED: legacy scoring, not used in evaluation_v3
 def _count_supportive_grounded_evidence(finding: ComplianceFinding) -> int:
     return sum(
         1

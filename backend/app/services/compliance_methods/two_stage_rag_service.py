@@ -33,8 +33,10 @@ from app.services.compliance_methods.record_retrieval_stage_service import (
 )
 from app.services.compliance_scoring_service import enrich_analysis_for_scoring
 from app.services.document_service import current_timestamp
+from app.services.evaluation_v3_service import safely_write_evaluation_v3_runtime_output
 from app.services.llm.errors import LLMGenerationError
 from app.services.llm.factory import get_llm_service
+from app.services.runtime_config import is_evaluation_v3_enabled
 from app.services.retrieval.faiss_retrieval import FAISS_TOP_K, RERANK_TOP_K, normalize_whitespace
 from app.services.retrieval.record_index_service import prepare_record_indexes
 from app.services.retrieval.reference_index_service import (
@@ -145,6 +147,13 @@ def run_two_stage_rag_compliance(
         response.model_dump_json(indent=2, exclude_none=True),
         encoding="utf-8",
     )
+    if is_evaluation_v3_enabled():
+        safely_write_evaluation_v3_runtime_output(
+            case_id=case_id,
+            compliance_response=response,
+            deliverables=deliverables,
+            retrieved_payload=retrieved_payload,
+        )
     return response
 
 

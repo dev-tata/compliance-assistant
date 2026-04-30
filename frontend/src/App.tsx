@@ -7,6 +7,7 @@ import {
   deleteDocument,
   extractDocumentDeliverables,
   getCaseDocuments,
+  getCaseComplianceEvaluationV3Result,
   getDocumentFileUrl,
   getCaseComplianceResult,
   getLatestDocumentDeliverables,
@@ -40,6 +41,7 @@ import type {
   DocumentLanguage,
   DocumentRecord,
   DocumentType,
+  EvaluationV3Result,
   LLMProviderDescriptor,
   SelectedDeliverablesByDocument,
 } from "./types";
@@ -84,22 +86,12 @@ function renderLinkedRows(
       <tr>
         <td>None</td>
         <td>None</td>
-        <td>None</td>
-        <td>None</td>
       </tr>
     `;
   }
 
   return rows.map((row, index) => {
     const finding = procedureToRecord?.[index];
-    const evidenceStrength = finding?.evidence_strength;
-    const coverage = finding?.requirement_coverage_percent;
-    const evidenceStrengthLabel = typeof evidenceStrength === "number"
-      ? `${(evidenceStrength * 100).toFixed(1)}%`
-      : "&mdash;";
-    const coverageLabel = typeof coverage === "number"
-      ? `${coverage}%`
-      : "&mdash;";
     return `
     <tr>
       <td>${index + 1}</td>
@@ -107,8 +99,6 @@ function renderLinkedRows(
         <div>${escapeHtml(row.requirement) || "&mdash;"}</div>
         ${row.rationale ? `<div class="row-rationale">${escapeHtml(row.rationale)}</div>` : ""}
       </td>
-      <td>${evidenceStrengthLabel}</td>
-      <td>${coverageLabel}</td>
       <td>
         <div>${finding ? formatFindingStatusLine(finding) : (escapeHtml(row.status) || "&mdash;")}</div>
       </td>
@@ -132,8 +122,11 @@ function formatRecallMetric(value: number): string {
   return `${value.toFixed(4)} / 1.0`;
 }
 
-function formatStrengthPercent(value: number): string {
-  return `${(value * 100).toFixed(1)}%`;
+function formatRatio(value: number | null | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "0.00";
+  }
+  return value.toFixed(2);
 }
 
 function summarizeStatuses(
@@ -205,11 +198,9 @@ function renderAssessmentBar({
   retrievalMetrics?: ComplianceResponse["retrieval_metrics"] | ComplianceResponse["baseline_retrieval_metrics"] | null;
   statusSummary: Record<"satisfied" | "partial" | "not_satisfied", number>;
 }): string {
-  const completedPercent = analysis.completion_percent;
+  const recallValue = retrievalMetrics?.average_record_recall_at_k ?? retrievalMetrics?.record_recall_at_k;
   return `
     <div class="assessment">
-      <span class="assessment-item assessment-item-edge-left">Completed <strong>${completedPercent}%</strong></span>
-      <span class="assessment-item">Weighted Completed <strong>${analysis.weighted_completion_percent}%</strong></span>
       <span class="assessment-item assessment-status-item">
         <span class="status status-satisfied">Satisfied</span>
         <span class="assessment-status-count">${statusSummary.satisfied}</span>
@@ -222,15 +213,9 @@ function renderAssessmentBar({
         <span class="status status-not_satisfied">Not_Satisfied</span>
         <span class="assessment-status-count">${statusSummary.not_satisfied}</span>
       </span>
-    </div>
-    <div class="assessment">
-      <span class="assessment-item">Coverage <strong>${analysis.overall_coverage_percent}%</strong></span>
-      <span class="assessment-item">Weighted Coverage <strong>${analysis.weighted_coverage_percent}%</strong></span>
-      <span class="assessment-item">Avg Evidence Strength <strong>${formatStrengthPercent(analysis.average_evidence_strength)}</strong></span>
-      <span class="assessment-item">Weighted Avg Strength <strong>${formatStrengthPercent(analysis.weighted_average_evidence_strength)}</strong></span>
       ${(typeof retrievalMetrics?.record_k === "number"
-        && typeof (retrievalMetrics?.average_record_recall_at_k ?? retrievalMetrics?.record_recall_at_k) === "number")
-        ? `<span class="assessment-item">Avg Recall@${retrievalMetrics.record_k} <strong>${formatRecallMetric(retrievalMetrics.average_record_recall_at_k ?? retrievalMetrics.record_recall_at_k ?? 0)}</strong></span>`
+        && typeof recallValue === "number")
+        ? `<span class="assessment-item">Avg Recall@${retrievalMetrics.record_k} <strong>${formatRecallMetric(recallValue)}</strong></span>`
         : ""}
     </div>
   `;
@@ -285,7 +270,7 @@ function renderRequirementEvaluations(
         </header>
         <div class="finding-metrics">
           <span><strong>Source:</strong> ${escapeHtml(finding.source_document || "none")}</span>
-          <span><strong>Evidence strength:</strong> ${(finding.evidence_strength * 100).toFixed(1)}% · <strong>Weight:</strong> ${finding.weight.toFixed(1)} · <strong>Coverage:</strong> ${finding.requirement_coverage_percent}%</span>
+          <span><strong>Weight:</strong> ${finding.weight.toFixed(1)}</span>
         </div>
         <ul>${renderEvidenceList(finding)}</ul>
       </article>
@@ -321,8 +306,6 @@ function renderStagePanel(
                 <tr>
                   <th>#</th>
                   <th>Requirement</th>
-                  <th>Evidence Strength</th>
-                  <th>Coverage</th>
                   <th>Status</th>
                 </tr>
               </thead>
@@ -342,13 +325,88 @@ function renderStagePanel(
   `;
 }
 
-function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string): void {
+function renderEvaluationV3Panel(evaluationV3: EvaluationV3Result): string {
+  const metrics = evaluationV3.metrics ?? {};
+  const rows = evaluationV3.units ?? [];
+  const rowsHtml = rows.length > 0
+    ? rows.map((row) => `
+      <tr>
+        <td>${escapeHtml(row.deliverable_id)}</td>
+        <td><span class="status status-${escapeHtml(row.final_label ?? "not_satisfied")}">${escapeHtml(row.final_label ?? "not_satisfied")}</span></td>
+        <td>${escapeHtml(row.evidence_status)}</td>
+        <td>${row.grounded_evidence_count}</td>
+        <td>${row.required_evidence_count}</td>
+        <td>${formatRatio(row.subsection_coverage_ratio)}</td>
+        <td>${row.has_conflict ? "Yes" : "No"}</td>
+        <td>${escapeHtml(row.contradiction_type)}</td>
+      </tr>
+    `).join("")
+    : `
+      <tr>
+        <td colspan="8">No Evaluation V3 units found.</td>
+      </tr>
+    `;
+
+  return `
+    <section class="stage-panel">
+      <h2 class="stage-panel-title">Evaluation V3 (evidence-based)</h2>
+      <div class="assessment">
+        <span class="assessment-item assessment-status-item">
+          <span class="status status-satisfied">Satisfied</span>
+          <span class="assessment-status-count">${metrics.satisfied_count ?? 0}</span>
+        </span>
+        <span class="assessment-item assessment-status-item">
+          <span class="status status-partial">Partial</span>
+          <span class="assessment-status-count">${metrics.partial_count ?? 0}</span>
+        </span>
+        <span class="assessment-item assessment-status-item">
+          <span class="status status-not_satisfied">Not_Satisfied</span>
+          <span class="assessment-status-count">${metrics.not_satisfied_count ?? 0}</span>
+        </span>
+        <span class="assessment-item">Supported <strong>${metrics.supported_count ?? 0}</strong></span>
+        <span class="assessment-item">Missing <strong>${metrics.missing_count ?? 0}</strong></span>
+        <span class="assessment-item">Conflicting <strong>${metrics.conflicting_count ?? 0}</strong></span>
+        <span class="assessment-item">Avg Grounded <strong>${formatRatio(metrics.avg_grounded_evidence_count)}</strong></span>
+        <span class="assessment-item">Avg Coverage <strong>${formatRatio(metrics.avg_subsection_coverage_ratio)}</strong></span>
+      </div>
+      <details class="stage-panel-details" open>
+        <summary>Evidence-based deliverables</summary>
+        <div class="stage-panel-body">
+          <div class="gap-table-wrap">
+            <table class="gap-table">
+              <thead>
+                <tr>
+                  <th>Deliverable</th>
+                  <th>Final Label</th>
+                  <th>Evidence Status</th>
+                  <th>Grounded</th>
+                  <th>Required</th>
+                  <th>Coverage</th>
+                  <th>Conflict</th>
+                  <th>Contradiction</th>
+                </tr>
+              </thead>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+    </section>
+  `;
+}
+
+function openComplianceWindow(
+  compliance: ComplianceResponse,
+  caseTitle?: string,
+  evaluationV3?: EvaluationV3Result | null,
+): void {
   const popup = window.open("", "_blank", "width=1080,height=900");
   if (!popup) {
     throw new Error("Popup blocked");
   }
 
   const stages = getComplianceStages(compliance);
+  const evaluationV3Panel = evaluationV3 ? renderEvaluationV3Panel(evaluationV3) : "";
   const stagePanels = stages.map((stage) => renderStagePanel(stage)).join("");
   popup.document.open();
   popup.document.write(`
@@ -575,6 +633,7 @@ function openComplianceWindow(compliance: ComplianceResponse, caseTitle?: string
               <p>Created: ${escapeHtml(formatDateTime(compliance.created_at))}</p>
             </div>
           </div>
+          ${evaluationV3Panel ? `<section>${evaluationV3Panel}</section>` : ""}
           <section>${stagePanels}</section>
         </div>
       </body>
@@ -611,6 +670,7 @@ export default function App() {
   const [selectedAdditionalComplianceDocuments, setSelectedAdditionalComplianceDocuments] = useState<string[]>([]);
   const [caseDocuments, setCaseDocuments] = useState<CaseDocuments | null>(null);
   const [latestCompliance, setLatestCompliance] = useState<ComplianceResponse | null>(null);
+  const [, setLatestEvaluationV3] = useState<EvaluationV3Result | null>(null);
   const [complianceHistory, setComplianceHistory] = useState<ComplianceSummary[]>([]);
   const [openComplianceDocumentsFile, setOpenComplianceDocumentsFile] = useState("");
   const [selectedComplianceFile, setSelectedComplianceFile] = useState("");
@@ -726,10 +786,17 @@ export default function App() {
     setError("");
     try {
       const result = await getCaseComplianceResult(caseId, fileName);
+      let evaluationV3: EvaluationV3Result | null = null;
+      try {
+        evaluationV3 = await getCaseComplianceEvaluationV3Result(caseId, fileName);
+      } catch {
+        evaluationV3 = null;
+      }
       setLatestCompliance(result);
+      setLatestEvaluationV3(evaluationV3);
       setSelectedComplianceFile(fileName);
       setSelectedCaseId(caseId);
-      openComplianceWindow(result, caseTitleById.get(caseId));
+      openComplianceWindow(result, caseTitleById.get(caseId), evaluationV3);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Loading compliance failed");
     } finally {
@@ -846,11 +913,21 @@ export default function App() {
         instructions,
         additionalDocumentFilenames: selectedAdditionalComplianceDocuments,
       });
+      let evaluationV3: EvaluationV3Result | null = null;
+      try {
+        const fileName = result.saved_at.split("/").pop() ?? "";
+        if (fileName) {
+          evaluationV3 = await getCaseComplianceEvaluationV3Result(selectedCaseId, fileName);
+        }
+      } catch {
+        evaluationV3 = null;
+      }
       setLatestCompliance(result);
+      setLatestEvaluationV3(evaluationV3);
       const fileName = result.saved_at.split("/").pop() ?? "";
       setSelectedComplianceFile(fileName);
       await refreshComplianceHistory();
-      openComplianceWindow(result, caseTitleById.get(selectedCaseId));
+      openComplianceWindow(result, caseTitleById.get(selectedCaseId), evaluationV3);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Compliance failed");
     } finally {
@@ -1136,6 +1213,7 @@ export default function App() {
         setCaseDocuments(null);
         setOpenComplianceDocumentsFile("");
         setLatestCompliance(null);
+        setLatestEvaluationV3(null);
         setComplianceHistory([]);
         setSelectedComplianceFile("");
       }
@@ -1162,6 +1240,7 @@ export default function App() {
         setSelectedComplianceFile("");
         if (latestCompliance?.saved_at.split("/").pop() === fileName) {
           setLatestCompliance(null);
+          setLatestEvaluationV3(null);
         }
       }
       if (openComplianceDocumentsFile === fileName) {
@@ -1192,6 +1271,7 @@ export default function App() {
       }
       setSelectedComplianceFile("");
       setLatestCompliance(null);
+      setLatestEvaluationV3(null);
       setOpenComplianceDocumentsFile("");
       setCaseDocuments(null);
       await refreshComplianceHistory();

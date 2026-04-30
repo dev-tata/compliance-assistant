@@ -3,7 +3,7 @@ from __future__ import annotations
 from google import genai
 
 from app.services.llm.base import BaseLLM
-from app.services.llm.config import get_required_env
+from app.services.llm.config import get_required_env, resolve_generation_temperature
 from app.services.llm.errors import LLMGenerationError, LLMQuotaExceededError
 
 
@@ -14,13 +14,17 @@ class GeminiService(BaseLLM):
         self.model = model
 
     def generate(self, prompt: str, *, temperature: float | None = None) -> str:
-        self._log_generate_start(prompt, temperature=temperature)
+        resolved_temperature = resolve_generation_temperature(
+            requested_temperature=temperature,
+            provider_default=0.2,
+        )
+        self._log_generate_start(prompt, temperature=resolved_temperature)
         try:
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=prompt,
                 config={
-                    "temperature": temperature if temperature is not None else 0.2,
+                    "temperature": resolved_temperature,
                     "response_mime_type": "application/json",
                 },
             )

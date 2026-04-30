@@ -52,6 +52,7 @@ class ComplianceSummary(BaseModel):
     provider: str
     model: str
     method: str = "non_rag"
+    # DEPRECATED: legacy scoring, not used in evaluation_v3
     completion_percent: int = Field(default=0, ge=0, le=100)
     satisfied_count: int = Field(default=0, ge=0)
     partial_count: int = Field(default=0, ge=0)

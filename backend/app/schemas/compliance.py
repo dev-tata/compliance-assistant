@@ -44,6 +44,7 @@ class ComplianceFinding(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     source_document: str = ""
     evidence_items: list["ComplianceEvidenceItem"] = Field(default_factory=list)
+    # DEPRECATED: legacy scoring, not used in evaluation_v3
     evidence_breadth: int = Field(default=0, ge=0)
     expected_evidence_breadth: int = Field(default=1, ge=1)
     evidence_strength: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -111,6 +112,7 @@ class ComplianceLinkedRow(BaseModel):
 
 
 class ComplianceAnalysis(BaseModel):
+    # DEPRECATED: legacy scoring, not used in evaluation_v3
     completion_percent: int = Field(default=0, ge=0, le=100)
     weighted_completion_percent: int = Field(default=0, ge=0, le=100)
     overall_coverage_percent: int = Field(default=0, ge=0, le=100)

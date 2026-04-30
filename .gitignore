@@ -38,6 +38,8 @@ backend/storage/
 # Evaluation folder (not shared, contains large files)
 backend/evaluation/
 backend/evaluation_setup/
+backend/evaluation_v3/
+backend/tests/
 
 # Frontend / Node
 frontend/node_modules/

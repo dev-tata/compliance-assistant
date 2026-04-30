@@ -20,6 +20,8 @@ except ImportError:  # pragma: no cover
     CrossEncoder = None
     SentenceTransformer = None
 
+from app.services.retrieval.score_utils import normalize_retrieval_score
+
 
 EMBED_MODEL_NAME = "BAAI/bge-base-en"
 RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -237,11 +239,13 @@ def rerank_results(
     scores = reranker.predict(pairs)
     reranked: list[dict[str, Any]] = []
     for candidate, score in zip(candidates, scores):
+        raw_score = round(float(score), 4)
         reranked.append(
             {
                 **candidate,
-                "reranker_score": round(float(score), 4),
-                "retrieval_score": round(float(score), 4),
+                "reranker_score": raw_score,
+                "raw_retrieval_score": raw_score,
+                "retrieval_score": round(normalize_retrieval_score(raw_score), 4),
             }
         )
     reranked.sort(
@@ -309,10 +313,14 @@ def _flatten_sections(
     source_filename: str,
     document_type: str,
     parent_heading: str | None = None,
+    root_section_id: str | None = None,
 ) -> list[dict[str, Any]]:
     flattened: list[dict[str, Any]] = []
     pending_heading_prefix: str | None = None
     for index, section in enumerate(sections):
+        current_section_id = normalize_whitespace(section.get("section_id"))
+        effective_section_id = root_section_id or current_section_id
+        subsection_id = current_section_id or effective_section_id
         heading_title = normalize_whitespace(section.get("heading_title"))
         effective_heading = " / ".join(
             part for part in (pending_heading_prefix, heading_title) if part
@@ -336,6 +344,7 @@ def _flatten_sections(
                     source_filename=source_filename,
                     document_type=document_type,
                     parent_heading=combined_heading,
+                    root_section_id=effective_section_id,
                 )
             )
             continue
@@ -344,7 +353,8 @@ def _flatten_sections(
             _build_section_chunks(
                 source_filename=source_filename,
                 document_type=document_type,
-                section_id=normalize_whitespace(section.get("section_id")),
+                section_id=effective_section_id,
+                subsection_id=subsection_id,
                 section_label=section_label,
                 heading_title=combined_heading,
                 text=text,
@@ -359,6 +369,7 @@ def _flatten_sections(
                 source_filename=source_filename,
                 document_type=document_type,
                 parent_heading=combined_heading,
+                root_section_id=effective_section_id,
             )
         )
     return flattened
@@ -369,6 +380,7 @@ def _build_section_chunks(
     source_filename: str,
     document_type: str,
     section_id: str,
+    subsection_id: str,
     section_label: str,
     heading_title: str,
     text: str | None,
@@ -402,6 +414,7 @@ def _build_section_chunks(
                 "source_document": source_filename,
                 "document_type": document_type,
                 "section_id": section_id,
+                "subsection_id": subsection_id or section_id,
                 "section_label": section_label,
                 "heading_title": heading_title,
                 "text": "",
@@ -430,6 +443,7 @@ def _build_section_chunks(
                 "source_document": source_filename,
                 "document_type": document_type,
                 "section_id": section_id,
+                "subsection_id": subsection_id or section_id,
                 "section_label": section_label,
                 "heading_title": heading_title,
                 "text": chunk_text,

@@ -131,7 +131,6 @@ export function ComplianceHistoryPanel({
                     <div className="history-main">
                       <div className="history-title-row">
                         <span className="history-case">{caseTitleById.get(item.case_id) ?? item.case_id}</span>
-                        <span className="document-option-meta">Completed <strong>{item.completion_percent}%</strong></span>
                         <span className="history-status-group">
                           <span className="history-status-chip history-status-chip-satisfied">SATISFIED</span>
                           <strong className="history-status-count">{item.satisfied_count}</strong>

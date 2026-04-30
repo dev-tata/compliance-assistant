@@ -295,12 +295,15 @@ def build_requirement_query_text(deliverable: dict[str, Any]) -> str:
 def serialize_retrieved_section(chunk: dict[str, Any]) -> dict[str, Any]:
     return {
         "source_document": chunk.get("source_document"),
+        "section_id": chunk.get("section_id"),
+        "subsection_id": chunk.get("subsection_id") or chunk.get("section_id"),
         "section_label": chunk.get("section_label"),
         "heading_title": chunk.get("heading_title"),
         "text": chunk.get("text"),
         "table_markdown": chunk.get("table_markdown"),
         "faiss_score": chunk.get("faiss_score"),
         "reranker_score": chunk.get("reranker_score"),
+        "raw_retrieval_score": chunk.get("raw_retrieval_score"),
         "retrieval_score": chunk.get("retrieval_score"),
     }
 
@@ -495,14 +498,14 @@ def normalize_requirement_linked_row(
         recommendation="",
     )
 
-
+# DEPRECATED: legacy scoring, not used in evaluation_v3
 def compute_completion_percent(findings: list[ComplianceFinding]) -> int:
     if not findings:
         return 0
     total_score = sum(STATUS_COMPLETION_SCORES.get(finding.status, 0) for finding in findings)
     return round(total_score / len(findings))
 
-
+# DEPRECATED: legacy scoring, not used in evaluation_v3
 def compute_weighted_completion_percent(findings: list[ComplianceFinding]) -> int:
     if not findings:
         return 0
@@ -515,7 +518,7 @@ def compute_weighted_completion_percent(findings: list[ComplianceFinding]) -> in
     )
     return round(total_score / total_weight)
 
-
+# DEPRECATED: legacy scoring, not used in evaluation_v3
 def compute_overall_coverage_percent(findings: list[ComplianceFinding]) -> int:
     if not findings:
         return 0
@@ -523,7 +526,7 @@ def compute_overall_coverage_percent(findings: list[ComplianceFinding]) -> int:
         sum(int(finding.requirement_coverage_percent or 0) for finding in findings) / len(findings)
     )
 
-
+# DEPRECATED: legacy scoring, not used in evaluation_v3
 def compute_weighted_coverage_percent(findings: list[ComplianceFinding]) -> int:
     if not findings:
         return 0
@@ -536,7 +539,7 @@ def compute_weighted_coverage_percent(findings: list[ComplianceFinding]) -> int:
     )
     return round(total_score / total_weight)
 
-
+# DEPRECATED: legacy scoring, not used in evaluation_v3
 def compute_average_evidence_strength(findings: list[ComplianceFinding]) -> float:
     if not findings:
         return 0.0
@@ -545,7 +548,7 @@ def compute_average_evidence_strength(findings: list[ComplianceFinding]) -> floa
         4,
     )
 
-
+# DEPRECATED: legacy scoring, not used in evaluation_v3
 def compute_weighted_average_evidence_strength(findings: list[ComplianceFinding]) -> float:
     if not findings:
         return 0.0
@@ -558,7 +561,7 @@ def compute_weighted_average_evidence_strength(findings: list[ComplianceFinding]
     )
     return round(total_score / total_weight, 4)
 
-
+# DEPRECATED: legacy scoring, not used in evaluation_v3
 def apply_computed_analysis_metrics(analysis: ComplianceAnalysis) -> ComplianceAnalysis:
     findings = analysis.procedure_to_record or analysis.findings
     completion_percent = compute_completion_percent(findings)
@@ -1004,18 +1007,24 @@ def _flatten_record_sections(
     *,
     source_document: str,
     parent_headings: list[str] | None = None,
+    root_section_id: str | None = None,
 ) -> list[dict[str, Any]]:
     flattened: list[dict[str, Any]] = []
     lineage = parent_headings or []
     for section in sections:
         if not isinstance(section, dict):
             continue
+        current_section_id = normalize_whitespace(section.get("section_id") or "")
+        effective_section_id = root_section_id or current_section_id
+        subsection_id = current_section_id or effective_section_id
         heading_title = normalize_whitespace(section.get("heading_title") or "")
         headings = [*lineage, heading_title] if heading_title else [*lineage]
         combined_heading = " / ".join(part for part in headings if part)
         flattened.append(
             {
                 "source_document": source_document,
+                "section_id": effective_section_id,
+                "subsection_id": subsection_id or effective_section_id,
                 "section_label": section.get("section_label"),
                 "heading_title": combined_heading or section.get("heading_title") or "",
                 "text": section.get("text"),
@@ -1029,6 +1038,8 @@ def _flatten_record_sections(
                     flattened.append(
                         {
                             "source_document": source_document,
+                            "section_id": effective_section_id,
+                            "subsection_id": subsection_id or effective_section_id,
                             "section_label": section.get("section_label"),
                             "heading_title": combined_heading or section.get("heading_title") or "",
                             "text": "",
@@ -1040,6 +1051,7 @@ def _flatten_record_sections(
                 section.get("subsections", []),
                 source_document=source_document,
                 parent_headings=headings,
+                root_section_id=effective_section_id,
             )
         )
     return flattened

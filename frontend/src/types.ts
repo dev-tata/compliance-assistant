@@ -61,6 +61,7 @@ export type ComplianceSummary = {
   provider: string;
   model: string;
   method: ComplianceMethod;
+  /** DEPRECATED: legacy scoring, not used in evaluation_v3 */
   completion_percent: number;
   satisfied_count: number;
   partial_count: number;
@@ -79,11 +80,16 @@ export type ComplianceFinding = {
   evidence: string[];
   source_document: string;
   evidence_items?: ComplianceEvidenceItem[];
+  /** DEPRECATED: legacy scoring, not used in evaluation_v3 */
   evidence_strength: number;
   weight: number;
+  /** DEPRECATED: legacy scoring, not used in evaluation_v3 */
   material_element_count: number;
+  /** DEPRECATED: legacy scoring, not used in evaluation_v3 */
   requirement_coverage_percent: number;
+  /** DEPRECATED: legacy scoring, not used in evaluation_v3 */
   evidence_breadth: number;
+  /** DEPRECATED: legacy scoring, not used in evaluation_v3 */
   expected_evidence_breadth: number;
 };
 
@@ -105,11 +111,17 @@ export type ComplianceLinkedRow = {
 };
 
 export type ComplianceAnalysis = {
+  /** DEPRECATED: legacy scoring, not used in evaluation_v3 */
   completion_percent: number;
+  /** DEPRECATED: legacy scoring, not used in evaluation_v3 */
   weighted_completion_percent: number;
+  /** DEPRECATED: legacy scoring, not used in evaluation_v3 */
   overall_coverage_percent: number;
+  /** DEPRECATED: legacy scoring, not used in evaluation_v3 */
   weighted_coverage_percent: number;
+  /** DEPRECATED: legacy scoring, not used in evaluation_v3 */
   average_evidence_strength: number;
+  /** DEPRECATED: legacy scoring, not used in evaluation_v3 */
   weighted_average_evidence_strength: number;
   gaps: string[];
   linked_rows: ComplianceLinkedRow[];
@@ -162,6 +174,49 @@ export type ComplianceResponse = {
   baseline_method?: string | null;
   baseline_analysis?: ComplianceAnalysis | null;
   baseline_retrieval_metrics?: RetrievalMetrics | null;
+};
+
+export type EvaluationV3Label = "satisfied" | "partial" | "not_satisfied";
+export type EvaluationV3EvidenceStatus = "supported" | "partial" | "missing" | "conflicting";
+export type EvaluationV3ContradictionType =
+  | "none"
+  | "missing_evidence"
+  | "direct_conflict"
+  | "wrong_entity"
+  | "temporal_conflict"
+  | "reference_conflict";
+
+export type EvaluationV3ResultRow = {
+  deliverable_id: string;
+  final_label?: EvaluationV3Label | null;
+  evidence_status: EvaluationV3EvidenceStatus;
+  grounded_evidence_count: number;
+  required_evidence_count: number;
+  subsection_coverage_ratio: number;
+  has_conflict: boolean;
+  contradiction_type: EvaluationV3ContradictionType;
+};
+
+export type EvaluationV3Metrics = {
+  satisfied_count: number;
+  partial_count: number;
+  not_satisfied_count: number;
+  supported_count: number;
+  missing_count: number;
+  conflicting_count: number;
+  avg_grounded_evidence_count: number;
+  avg_subsection_coverage_ratio: number;
+};
+
+export type EvaluationV3Result = {
+  case_id: string;
+  created_at: string;
+  source_compliance_saved_at: string;
+  compliance_provider: string;
+  compliance_model: string;
+  method: string;
+  metrics: Partial<EvaluationV3Metrics>;
+  units: EvaluationV3ResultRow[];
 };
 
 export type DeliverableItem = {

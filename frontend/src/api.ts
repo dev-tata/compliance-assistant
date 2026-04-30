@@ -8,6 +8,7 @@ import type {
   DocumentLanguage,
   DocumentRecord,
   DocumentType,
+  EvaluationV3Result,
   LLMProviderDescriptor,
   SelectedDeliverablesByDocument,
 } from "./types";
@@ -166,6 +167,17 @@ export async function getCaseComplianceResult(
   return handle<ComplianceResponse>(
     await fetch(
       `${API_BASE}/cases/${encodeURIComponent(caseId)}/compliances/${encodeURIComponent(fileName)}`,
+    ),
+  );
+}
+
+export async function getCaseComplianceEvaluationV3Result(
+  caseId: string,
+  fileName: string,
+): Promise<EvaluationV3Result> {
+  return handle<EvaluationV3Result>(
+    await fetch(
+      `${API_BASE}/cases/${encodeURIComponent(caseId)}/compliances/${encodeURIComponent(fileName)}/evaluation-v3`,
     ),
   );
 }

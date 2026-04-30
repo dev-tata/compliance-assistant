@@ -3,7 +3,7 @@ from __future__ import annotations
 from openai import OpenAI
 
 from app.services.llm.base import BaseLLM
-from app.services.llm.config import DEFAULT_SYSTEM_PROMPT, get_required_env
+from app.services.llm.config import DEFAULT_SYSTEM_PROMPT, get_required_env, resolve_generation_temperature
 from app.services.llm.errors import LLMGenerationError, LLMQuotaExceededError
 
 
@@ -14,7 +14,11 @@ class OpenAIService(BaseLLM):
         self.client = OpenAI(api_key=get_required_env("OPENAI_API_KEY"))
 
     def generate(self, prompt: str, *, temperature: float | None = None) -> str:
-        self._log_generate_start(prompt, temperature=temperature)
+        resolved_temperature = resolve_generation_temperature(
+            requested_temperature=temperature,
+            provider_default=None,
+        )
+        self._log_generate_start(prompt, temperature=resolved_temperature)
         try:
             request_kwargs = {
                 "model": self.model,
@@ -24,8 +28,8 @@ class OpenAIService(BaseLLM):
                     {"role": "user", "content": prompt},
                 ],
             }
-            if temperature is not None and temperature != 0.0:
-                request_kwargs["temperature"] = temperature
+            if resolved_temperature is not None and resolved_temperature != 0.0:
+                request_kwargs["temperature"] = resolved_temperature
 
             response = self.client.chat.completions.create(**request_kwargs)
         except Exception as exc:

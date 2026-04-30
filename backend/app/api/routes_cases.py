@@ -19,6 +19,7 @@ from app.services.case_service import (
     _load_parsed_json_file,
     delete_case_compliance_result,
     get_case_deliverables_payload,
+    get_case_compliance_evaluation_v3_result,
     get_case_compliance_result,
     get_case_compliance_payload,
     get_case_documents,
@@ -183,6 +184,11 @@ def get_case_compliances(case_id: str):
 @router.get("/{case_id}/compliances/{file_name}", response_model=ComplianceResponse)
 def get_case_compliance_result_by_file(case_id: str, file_name: str):
     return get_case_compliance_result(case_id, file_name)
+
+
+@router.get("/{case_id}/compliances/{file_name}/evaluation-v3")
+def get_case_compliance_evaluation_v3_result_by_file(case_id: str, file_name: str):
+    return get_case_compliance_evaluation_v3_result(case_id, file_name)
 
 
 @router.delete("/{case_id}/compliances/{file_name}", response_model=ComplianceSummary)

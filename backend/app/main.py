@@ -3,10 +3,11 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from pathlib import Path
 
 from app.api import routes_cases, routes_deliverables, routes_documents, routes_llm
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 app = FastAPI(
     title="compliance assistant API",

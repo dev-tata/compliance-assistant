@@ -25,10 +25,13 @@ from app.services.document_service import (
     get_or_parse_document,
     load_document_registry,
 )
+from app.services.evaluation_v3_service import delete_evaluation_v3_runs_for_compliance
+from app.services.evaluation_v3_service import EVALUATION_V3_RUNTIME_DIR
 from app.services.compliance_methods.compliance_method_common import (
     compute_completion_percent,
 )
 from app.services.storage_paths import CASES_DIR, CASE_REGISTRY_PATH, get_case_compliance_dir, write_case_manifest
+from evaluation_v3 import EvaluationV3Result
 
 CASES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -340,6 +343,20 @@ def get_case_compliance_result(case_id: str, file_name: str) -> ComplianceRespon
     return ComplianceResponse(**payload)
 
 
+def get_case_compliance_evaluation_v3_result(case_id: str, file_name: str) -> EvaluationV3Result:
+    compliance = get_case_compliance_result(case_id, file_name)
+    evaluation_v3_path = _find_evaluation_v3_result_path(compliance.saved_at)
+    if evaluation_v3_path is None:
+        raise HTTPException(status_code=404, detail="Evaluation V3 result not found")
+
+    try:
+        payload = json.loads(evaluation_v3_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Evaluation V3 result file corrupted") from exc
+
+    return EvaluationV3Result(**payload)
+
+
 def delete_case_compliance_result(case_id: str, file_name: str) -> ComplianceSummary:
     get_case_or_404(case_id)
 
@@ -353,6 +370,9 @@ def delete_case_compliance_result(case_id: str, file_name: str) -> ComplianceSum
     if summary is None:
         raise HTTPException(status_code=500, detail="Compliance result file corrupted")
 
+    compliance_saved_at = _load_compliance_saved_at(path)
+    if compliance_saved_at:
+        delete_evaluation_v3_runs_for_compliance(compliance_saved_at=compliance_saved_at)
     path.unlink()
     return summary
 
@@ -422,6 +442,43 @@ def _load_compliance_summary(path: Path, *, fallback_case_id: str) -> Compliance
 
 def _timestamp_from_path(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+
+
+def _load_compliance_saved_at(path: Path) -> str:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return ""
+    saved_at = payload.get("saved_at")
+    return str(saved_at).strip() if saved_at else ""
+
+
+def _find_evaluation_v3_result_path(compliance_saved_at: str) -> Path | None:
+    if not compliance_saved_at or not EVALUATION_V3_RUNTIME_DIR.exists():
+        return None
+
+    for run_dir in sorted(EVALUATION_V3_RUNTIME_DIR.iterdir(), reverse=True):
+        if not run_dir.is_dir():
+            continue
+        result_path = next(
+            (
+                path
+                for path in run_dir.iterdir()
+                if path.is_file()
+                and path.suffix == ".json"
+                and path.name.endswith("_evaluation_v3.json")
+            ),
+            None,
+        )
+        if result_path is None:
+            continue
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if str(payload.get("source_compliance_saved_at") or "").strip() == compliance_saved_at:
+            return result_path
+    return None
 
 
 def _normalize_compliance_analysis_payload(payload: Any) -> dict[str, Any]:
