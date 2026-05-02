@@ -1,6 +1,8 @@
 from __future__ import annotations
 from typing import Any
 
+from evaluation_v3 import derive_deliverable_requirement_metadata
+
 from app.schemas.compliance import (
     ComplianceAnalysis,
     ComplianceEvidenceItem,
@@ -91,6 +93,7 @@ def run_two_stage_rag_compliance(
         prepared_record_indexes=prepared_record_indexes,
     )
 
+    print(f"[compliance][{case_id}] Stage 1 LLM start", flush=True)
     stage_1 = _run_stage_1_non_rag(
         llm_service=llm_service,
         case_payload=case_payload,
@@ -98,6 +101,8 @@ def run_two_stage_rag_compliance(
         instructions=request.instructions,
         allowed_record_documents=allowed_record_documents,
     )
+    print(f"[compliance][{case_id}] Stage 1 LLM success", flush=True)
+    print(f"[compliance][{case_id}] Stage 2 LLM start", flush=True)
     stage_2 = _run_stage_2_record_retrieval(
         llm_service=llm_service,
         deliverables=deliverables,
@@ -105,12 +110,14 @@ def run_two_stage_rag_compliance(
         allowed_record_documents=allowed_record_documents,
         retrieved_payload=retrieved_payload,
     )
+    print(f"[compliance][{case_id}] Stage 2 LLM success", flush=True)
     retrieved_payload = _attach_stage_2_reference_context(
         deliverables=deliverables,
         stage_2_analysis=stage_2.analysis,
         retrieved_payload=retrieved_payload,
         reference_context_indexes=reference_context_indexes,
     )
+    print(f"[compliance][{case_id}] Stage 3 LLM start", flush=True)
     stage_3 = _run_stage_3_reference_retrieval(
         llm_service=llm_service,
         deliverables=deliverables,
@@ -119,6 +126,7 @@ def run_two_stage_rag_compliance(
         retrieved_payload=retrieved_payload,
         stage_2_analysis=stage_2.analysis,
     )
+    print(f"[compliance][{case_id}] Stage 3 LLM success", flush=True)
 
     saved_path = build_compliance_result_path(case_id)
     response = ComplianceResponse(
@@ -341,6 +349,7 @@ def _run_stage_3_reference_retrieval(
     analysis = _merge_stage_analysis(
         candidate_analysis=candidate_analysis,
         previous_analysis=stage_2_analysis,
+        deliverables=deliverables,
         retrieved_payload=retrieved_payload,
         allowed_record_documents=allowed_record_documents,
         stage_key=STAGE_3_KEY,
@@ -414,6 +423,8 @@ def _normalize_retrieval_stage_analysis(
     for index, candidate_finding in enumerate(candidate_findings):
         candidate_row = candidate_rows[index] if index < len(candidate_rows) else None
         retrieved_sections = retrieved_payload[index].get("retrieved_record_sections", [])
+        deliverable = deliverables[index] if index < len(deliverables) else {}
+        required_evidence_count = derive_deliverable_requirement_metadata(deliverable).get("required_evidence_count")
         normalized_finding = normalize_requirement_finding(
             finding=candidate_finding,
             retrieved_record_sections=retrieved_sections,
@@ -424,6 +435,7 @@ def _normalize_retrieval_stage_analysis(
             previous_finding=normalized_finding.model_copy(update={"evidence_items": []}),
             stage_key=stage_key,
             stage_label=stage_label,
+            required_evidence_count=required_evidence_count,
         )
         normalized_findings.append(tagged_finding)
         normalized_rows.append(
@@ -456,6 +468,7 @@ def _merge_stage_analysis(
     *,
     candidate_analysis: ComplianceAnalysis,
     previous_analysis: ComplianceAnalysis,
+    deliverables: list[dict[str, Any]],
     retrieved_payload: list[dict[str, Any]],
     allowed_record_documents: set[str],
     stage_key: str,
@@ -470,6 +483,8 @@ def _merge_stage_analysis(
     merged_findings: list[ComplianceFinding] = []
     merged_rows: list[ComplianceLinkedRow] = []
     for index, previous_finding in enumerate(previous_findings):
+        deliverable = deliverables[index] if index < len(deliverables) else {}
+        required_evidence_count = derive_deliverable_requirement_metadata(deliverable).get("required_evidence_count")
         candidate_finding = candidate_findings[index] if index < len(candidate_findings) else previous_finding
         previous_row = previous_rows[index] if index < len(previous_rows) else None
         candidate_row = candidate_rows[index] if index < len(candidate_rows) else None
@@ -501,6 +516,7 @@ def _merge_stage_analysis(
                 previous_finding=previous_finding,
                 stage_key=stage_key,
                 stage_label=stage_label,
+                required_evidence_count=required_evidence_count,
             )
             merged_row = normalize_requirement_linked_row(
                 finding=merged_finding,
@@ -512,6 +528,7 @@ def _merge_stage_analysis(
                 previous_finding=previous_finding,
                 stage_key=stage_key,
                 stage_label=stage_label,
+                required_evidence_count=required_evidence_count,
             )
             merged_row = normalize_requirement_linked_row(
                 finding=merged_finding,
@@ -603,6 +620,7 @@ def _tag_finding_evidence(
     previous_finding: ComplianceFinding,
     stage_key: str,
     stage_label: str,
+    required_evidence_count: int | None = None,
 ) -> ComplianceFinding:
     current_items = _build_evidence_item_lookup(finding.evidence_items)
     inherited = _build_evidence_item_lookup(previous_finding.evidence_items)
@@ -629,7 +647,12 @@ def _tag_finding_evidence(
                     stage_label=stage_label,
                 )
             )
-    return finding.model_copy(update={"evidence_items": evidence_items})
+    capped_items = _cap_merged_evidence_items(
+        preferred_items=evidence_items,
+        fallback_items=[],
+        required_evidence_count=required_evidence_count,
+    )
+    return finding.model_copy(update={"evidence": [item.text for item in capped_items], "evidence_items": capped_items})
 
 
 def _retag_existing_evidence_items(
@@ -667,38 +690,20 @@ def _merge_finding_evidence(
     previous_finding: ComplianceFinding,
     stage_key: str,
     stage_label: str,
+    required_evidence_count: int | None = None,
 ) -> ComplianceFinding:
     tagged_candidate = _tag_finding_evidence(
         finding=candidate_finding,
         previous_finding=previous_finding,
         stage_key=stage_key,
         stage_label=stage_label,
+        required_evidence_count=required_evidence_count,
     )
-    evidence_by_key = _build_evidence_item_lookup(previous_finding.evidence_items)
-    ordered_keys = [
-        _normalize_evidence_key(item.text)
-        for item in previous_finding.evidence_items
-        if _normalize_evidence_key(item.text)
-    ]
-
-    for item in tagged_candidate.evidence_items:
-        key = _normalize_evidence_key(item.text)
-        if not key:
-            continue
-        existing = evidence_by_key.get(key)
-        if existing is None:
-            ordered_keys.append(key)
-            evidence_by_key[key] = item
-            continue
-        evidence_by_key[key] = existing.model_copy(
-            update={
-                "source_document": existing.source_document or item.source_document,
-                "stage_key": existing.stage_key or item.stage_key,
-                "stage_label": existing.stage_label or item.stage_label,
-            }
-        )
-
-    merged_items = [evidence_by_key[key] for key in ordered_keys if key in evidence_by_key]
+    merged_items = _cap_merged_evidence_items(
+        preferred_items=tagged_candidate.evidence_items,
+        fallback_items=previous_finding.evidence_items,
+        required_evidence_count=required_evidence_count,
+    )
     merged_source = previous_finding.source_document or tagged_candidate.source_document
     for item in merged_items:
         merged_source = merged_source or item.source_document
@@ -710,6 +715,25 @@ def _merge_finding_evidence(
             "evidence_items": merged_items,
         }
     )
+
+
+def _cap_merged_evidence_items(
+    *,
+    preferred_items: list[ComplianceEvidenceItem],
+    fallback_items: list[ComplianceEvidenceItem],
+    required_evidence_count: int | None,
+) -> list[ComplianceEvidenceItem]:
+    merged: list[ComplianceEvidenceItem] = []
+    seen: set[str] = set()
+    for item in [*preferred_items, *fallback_items]:
+        key = _normalize_evidence_key(item.text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    if isinstance(required_evidence_count, int) and required_evidence_count > 0:
+        return merged[:required_evidence_count]
+    return merged
 
 
 def _search_requirement_context(

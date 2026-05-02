@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
@@ -9,6 +10,8 @@ ComplianceStatus = Literal["satisfied", "partial", "not_satisfied"]
 ComplianceMethod = Literal["non_rag", "two_stage_rag"]
 ComplianceRequestMethod = Literal["two_stage_rag"]
 ComplianceRequirementSource = Literal["auto", "procedure_sections", "deliverables"]
+VALID_STATUSES = {"satisfied", "partial", "not_satisfied"}
+log = logging.getLogger(__name__)
 
 class ComplianceRequest(BaseModel):
     provider: str
@@ -58,7 +61,10 @@ class ComplianceFinding(BaseModel):
         if not isinstance(data, dict):
             return data
         data = dict(data)
-        data["status"] = _normalize_compliance_status(data.get("status") or "not_satisfied")
+        # IMPORTANT:
+        # Status must come ONLY from LLM output.
+        # Evidence presence must NOT upgrade status.
+        data["status"] = _normalize_compliance_status(data.get("status"))
         data["evidence"] = _normalize_string_list(data.get("evidence"))
         data["source_document"] = _normalize_source_document(
             data.get("source_document", data.get("source_documents"))
@@ -106,7 +112,10 @@ class ComplianceLinkedRow(BaseModel):
         if not isinstance(data, dict):
             return data
         data = dict(data)
-        data["status"] = _normalize_compliance_status(data.get("status") or "not_satisfied")
+        # IMPORTANT:
+        # Status must come ONLY from LLM output.
+        # Evidence presence must NOT upgrade status.
+        data["status"] = _normalize_compliance_status(data.get("status"))
         data["rationale"] = str(data.get("rationale") or "").strip()
         return data
 
@@ -238,7 +247,11 @@ def _normalize_compliance_status(value: object) -> str:
         "not_matched": "not_satisfied",
         "no_match": "not_satisfied",
     }
-    return alias_map.get(normalized, normalized)
+    normalized = alias_map.get(normalized, normalized)
+    if normalized not in VALID_STATUSES:
+        log.warning("Invalid status '%s', defaulting to partial", value)
+        return "partial"
+    return normalized
 
 
 def _normalize_string_list(value: object) -> list[str]:

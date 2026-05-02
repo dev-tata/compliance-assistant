@@ -15,6 +15,7 @@ from app.services.deliverable_methods.extraction_method_common import (
     postprocess_deliverables,
     save_deliverable_extraction_response,
     serialize_sections_for_prompt,
+    serialize_sections_for_prompt_legacy,
     should_skip_heading,
     summarize_section_text,
 )
@@ -138,18 +139,22 @@ def _extract_document_requirements(
     if not sections:
         return []
 
+    legacy_payload = {
+        "prompt_version": PROMPT_VERSION,
+        "sections": serialize_sections_for_prompt_legacy(sections),
+    }
     payload = {
         "prompt_version": PROMPT_VERSION,
         "sections": serialize_sections_for_prompt(sections),
     }
-    prompt_parts = [
-        *build_document_extraction_instructions(),
-        f"Document payload:\n{json.dumps(payload, ensure_ascii=False, indent=2)}",
-    ]
-    if request.instructions:
-        prompt_parts.append(f"Additional user instructions:\n{request.instructions}")
-
-    raw_response = llm_service.generate("\n\n".join(prompt_parts), temperature=0.0)
+    before_prompt = _build_document_extraction_prompt(payload=legacy_payload, instructions=request.instructions)
+    after_prompt = _build_document_extraction_prompt(payload=payload, instructions=request.instructions)
+    print(
+        f"[PROMPT] version={PROMPT_VERSION} "
+        f"before_prompt_length={len(before_prompt)} after_prompt_length={len(after_prompt)}",
+        flush=True,
+    )
+    raw_response = llm_service.generate(after_prompt, temperature=0.0)
     section_lookup = {
         normalize_whitespace(section.get("section_ref")): section
         for section in sections
@@ -168,6 +173,16 @@ def _extract_document_requirements(
         )
         raise LLMGenerationError(f"Invalid deliverable extraction response from model: {exc}") from exc
     return items
+
+
+def _build_document_extraction_prompt(*, payload: dict[str, Any], instructions: str | None) -> str:
+    prompt_parts = [
+        *build_document_extraction_instructions(),
+        f"Document payload:\n{json.dumps(payload, ensure_ascii=False, indent=2)}",
+    ]
+    if instructions:
+        prompt_parts.append(f"Additional user instructions:\n{instructions}")
+    return "\n\n".join(prompt_parts)
 
 
 def _resolve_item_section(

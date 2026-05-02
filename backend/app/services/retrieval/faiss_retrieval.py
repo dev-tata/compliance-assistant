@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from threading import Lock
 from pathlib import Path
@@ -20,9 +21,6 @@ except ImportError:  # pragma: no cover
     CrossEncoder = None
     SentenceTransformer = None
 
-from app.services.retrieval.score_utils import normalize_retrieval_score
-
-
 EMBED_MODEL_NAME = "BAAI/bge-base-en"
 RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 FAISS_TOP_K = 10
@@ -37,6 +35,7 @@ _EMBEDDER: Any | None = None
 _RERANKER: Any | None = None
 _EMBEDDER_LOCK = Lock()
 _RERANKER_LOCK = Lock()
+logger = logging.getLogger(__name__)
 
 
 def normalize_whitespace(value: str | None) -> str:
@@ -200,12 +199,15 @@ def search_index(
         if position < 0:
             continue
         chunk = chunks[int(position)]
+        faiss_score = round(float(score), 4)
         results.append(
             {
                 **chunk,
-                "faiss_score": round(float(score), 4),
+                "faiss_score": _coerce_score(chunk.get("faiss_score")) or faiss_score,
+                "raw_retrieval_score": _coerce_score(chunk.get("raw_retrieval_score")) or faiss_score,
             }
         )
+    print("FAISS results:", len(results))
     return results
 
 
@@ -230,6 +232,9 @@ def rerank_results(
 ) -> list[dict[str, Any]]:
     if not candidates:
         return []
+    if CrossEncoder is None:
+        raise RuntimeError("CrossEncoder not initialized")
+    print("RERANK CALLED", len(candidates))
     reranker = get_reranker()
     normalized_query = normalize_whitespace(query_text)
     pairs = [
@@ -237,17 +242,32 @@ def rerank_results(
         for candidate in candidates
     ]
     scores = reranker.predict(pairs)
+    print("RERANK SCORES SAMPLE:", list(scores[:5]))
     reranked: list[dict[str, Any]] = []
     for candidate, score in zip(candidates, scores):
-        raw_score = round(float(score), 4)
+        reranker_score = round(float(score), 4)
+        raw_retrieval_score = _coerce_score(candidate.get("raw_retrieval_score"))
+        if raw_retrieval_score is None:
+            raw_retrieval_score = _coerce_score(candidate.get("faiss_score"))
+        print(
+            {
+                "stage": "faiss_retrieval.rerank_chunks",
+                "text": str(candidate.get("text") or "")[:80],
+                "raw_score": raw_retrieval_score,
+                "reranker_score": reranker_score,
+                "retrieval_score": reranker_score if reranker_score is not None else raw_retrieval_score,
+            }
+        )
         reranked.append(
             {
                 **candidate,
-                "reranker_score": raw_score,
-                "raw_retrieval_score": raw_score,
-                "retrieval_score": round(normalize_retrieval_score(raw_score), 4),
+                "faiss_score": _coerce_score(candidate.get("faiss_score")) or raw_retrieval_score,
+                "reranker_score": reranker_score,
+                "raw_retrieval_score": raw_retrieval_score,
+                "retrieval_score": raw_retrieval_score,
             }
         )
+    _normalize_reranked_retrieval_scores(reranked)
     reranked.sort(
         key=lambda item: (
             float(item.get("reranker_score") or 0.0),
@@ -255,7 +275,40 @@ def rerank_results(
         ),
         reverse=True,
     )
-    return reranked[: min(max(final_top_k, 1), len(reranked))]
+    final_results = reranked[: min(max(final_top_k, 1), len(reranked))]
+    if final_results:
+        logger.info(
+            "RETRIEVAL DEBUG: count=%d | retrieval_score=%s | reranker_score=%s | raw_score=%s",
+            len(final_results),
+            final_results[0].get("retrieval_score"),
+            final_results[0].get("reranker_score"),
+            final_results[0].get("raw_retrieval_score"),
+        )
+    else:
+        logger.info(
+            "RETRIEVAL DEBUG: count=%d | retrieval_score=%s | reranker_score=%s | raw_score=%s",
+            0,
+            None,
+            None,
+            None,
+        )
+    print(
+        "RERANK APPLIED:",
+        len(final_results),
+        "scores:",
+        final_results[0].get("retrieval_score") if final_results else None,
+    )
+    for result in final_results[:3]:
+        print(
+            {
+                "text": str(result.get("text") or "")[:80],
+                "faiss_score": result.get("faiss_score"),
+                "reranker_score": result.get("reranker_score"),
+                "raw_retrieval_score": result.get("raw_retrieval_score"),
+                "retrieval_score": result.get("retrieval_score"),
+            }
+        )
+    return final_results
 
 
 def get_embedder() -> Any:
@@ -289,6 +342,43 @@ def get_tokenizer() -> Any:
     if tokenizer is None:  # pragma: no cover
         raise RuntimeError("Embedding model tokenizer is unavailable.")
     return tokenizer
+
+
+def _coerce_score(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return round(float(value), 4)
+    return None
+
+
+def _normalize_reranked_retrieval_scores(chunks: list[dict[str, Any]]) -> None:
+    reranker_scores = [
+        float(chunk.get("reranker_score"))
+        for chunk in chunks
+        if isinstance(chunk.get("reranker_score"), (int, float))
+    ]
+    if not reranker_scores:
+        for chunk in chunks:
+            raw_score = chunk.get("raw_retrieval_score")
+            if isinstance(raw_score, (int, float)):
+                chunk["retrieval_score"] = float(raw_score)
+        return
+
+    min_score = min(reranker_scores)
+    max_score = max(reranker_scores)
+    for chunk in chunks:
+        reranker_score = chunk.get("reranker_score")
+        if not isinstance(reranker_score, (int, float)):
+            raw_score = chunk.get("raw_retrieval_score")
+            if isinstance(raw_score, (int, float)):
+                chunk["retrieval_score"] = float(raw_score)
+            continue
+        if max_score == min_score:
+            chunk["retrieval_score"] = 1.0
+        else:
+            chunk["retrieval_score"] = round(
+                (float(reranker_score) - min_score) / (max_score - min_score),
+                4,
+            )
 
 
 def _chunk_rerank_text(chunk: dict[str, Any]) -> str:

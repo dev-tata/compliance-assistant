@@ -23,15 +23,46 @@ def build_record_retrieval_payload(
 ) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for index, deliverable in enumerate(deliverables):
-        retrieved_record_sections = [
-            serialize_retrieved_section(section)
-            for section in search_prepared_record_indexes(
-                prepared_indexes=prepared_record_indexes,
-                query_text=build_requirement_query_text(deliverable),
-                top_k=RECORD_TOP_K,
-                final_top_k=RECORD_FINAL_TOP_K,
+        raw_sections = search_prepared_record_indexes(
+            prepared_indexes=prepared_record_indexes,
+            query_text=build_requirement_query_text(deliverable),
+            top_k=RECORD_TOP_K,
+            final_top_k=RECORD_FINAL_TOP_K,
+        )
+        if index == 0:
+            print(
+                {
+                    "stage": "record_retrieval_stage.raw_sections",
+                    "requirement_ref": f"REQ-{index + 1}",
+                    "count": len(raw_sections),
+                    "sections": [
+                        {
+                            "keys": sorted(section.keys()),
+                            "faiss_score": section.get("faiss_score"),
+                            "reranker_score": section.get("reranker_score"),
+                            "raw_retrieval_score": section.get("raw_retrieval_score"),
+                            "retrieval_score": section.get("retrieval_score"),
+                        }
+                        for section in raw_sections[:5]
+                    ],
+                }
             )
-        ]
+        retrieved_record_sections: list[dict[str, Any]] = []
+        for section in raw_sections:
+            serialized_section = serialize_retrieved_section(section)
+            if index == 0:
+                print(
+                    {
+                        "stage": "record_retrieval_stage.serialized_section",
+                        "requirement_ref": f"REQ-{index + 1}",
+                        "keys": sorted(serialized_section.keys()),
+                        "faiss_score": serialized_section.get("faiss_score"),
+                        "reranker_score": serialized_section.get("reranker_score"),
+                        "raw_retrieval_score": serialized_section.get("raw_retrieval_score"),
+                        "retrieval_score": serialized_section.get("retrieval_score"),
+                    }
+                )
+            retrieved_record_sections.append(serialized_section)
         payload.append(
             {
                 "requirement_ref": f"REQ-{index + 1}",

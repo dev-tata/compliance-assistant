@@ -38,16 +38,18 @@ CASES_DIR.mkdir(parents=True, exist_ok=True)
 
 def load_case_registry() -> list[dict]:
     if not CASE_REGISTRY_PATH.exists():
-        return []
+        registry: list[dict] = []
+    else:
+        try:
+            with open(CASE_REGISTRY_PATH, "r", encoding="utf-8-sig") as file:
+                registry = json.load(file)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=500, detail="Case registry corrupted")
 
-    try:
-        with open(CASE_REGISTRY_PATH, "r", encoding="utf-8-sig") as file:
-            registry = json.load(file)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Case registry corrupted")
+    registry, reconciled_changed = _reconcile_case_registry_from_manifests(registry)
 
     normalized_registry: list[dict] = []
-    changed = False
+    changed = reconciled_changed
     for item in registry:
         procedure_stored_filenames = item.get("procedure_stored_filenames")
         record_stored_filenames = item.get("record_stored_filenames")
@@ -77,6 +79,30 @@ def load_case_registry() -> list[dict]:
     if changed:
         save_case_registry(normalized_registry)
     return normalized_registry
+
+
+def _reconcile_case_registry_from_manifests(registry: list[dict]) -> tuple[list[dict], bool]:
+    indexed = {
+        str(item.get("case_id") or "").strip(): dict(item)
+        for item in registry
+        if str(item.get("case_id") or "").strip()
+    }
+    changed = False
+
+    for manifest_path in sorted(CASES_DIR.glob("*/case.json")):
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        case_id = str(payload.get("case_id") or "").strip()
+        if not case_id:
+            continue
+        if case_id in indexed:
+            continue
+        indexed[case_id] = payload
+        changed = True
+
+    return list(indexed.values()), changed
 
 
 def save_case_registry(registry: list[dict]) -> None:

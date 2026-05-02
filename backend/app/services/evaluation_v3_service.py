@@ -36,6 +36,14 @@ logger = logging.getLogger(__name__)
 
 EVALUATION_V3_RUNTIME_DIR = BACKEND_ROOT / "evaluation_v3" / "runs"
 EVALUATION_V3_MANUAL_COMPARISONS_DIR = BACKEND_ROOT / "evaluation_v3" / "manual_comparisons"
+CONTRADICTION_PRIORITY = (
+    "direct_conflict",
+    "reference_conflict",
+    "reference_clarification",
+    "missing_evidence",
+    "none",
+)
+MAX_MERGED_RATIONALE_LENGTH = 1200
 
 
 def write_evaluation_v3_runtime_output(
@@ -60,6 +68,10 @@ def write_evaluation_v3_runtime_output(
     summary_export_path = build_evaluation_v3_summary_export_path(run_dir=run_dir)
     comparison_export_path = build_evaluation_v3_comparison_export_path(run_dir=run_dir)
     result_rows = build_evaluation_v3_result_rows(units)
+    result_rows_by_id = {
+        row.deliverable_id: row
+        for row in result_rows
+    }
     trace_metadata = _build_evaluation_v3_trace_metadata(
         model_name=compliance_response.compliance_model,
         timestamp=timestamp,
@@ -74,7 +86,10 @@ def write_evaluation_v3_runtime_output(
         units=units,
         aggregate_metrics=aggregate_metrics,
     ).model_dump(exclude_none=True)
-    payload["config"] = trace_metadata["config"]
+    if "config" in trace_metadata:
+        payload["config"] = trace_metadata["config"]
+    if "diagnostic_config" in trace_metadata:
+        payload["diagnostic_config"] = trace_metadata["diagnostic_config"]
     payload["model_name"] = trace_metadata["model_name"]
     payload["timestamp"] = trace_metadata["timestamp"]
     saved_path.write_text(
@@ -114,7 +129,15 @@ def write_evaluation_v3_runtime_output(
                     {
                         "deliverable_id": unit.deliverable.deliverable_id,
                         "stage_3_label": unit.stage_3_answer.label,
-                        "final_label": unit.final_label,
+                        "final_label": result_rows_by_id[unit.deliverable.deliverable_id].final_label,
+                        "evidence_status": result_rows_by_id[unit.deliverable.deliverable_id].evidence_status,
+                        "grounded_evidence_count": result_rows_by_id[
+                            unit.deliverable.deliverable_id
+                        ].grounded_evidence_count,
+                        "has_conflict": result_rows_by_id[unit.deliverable.deliverable_id].has_conflict,
+                        "contradiction_type": result_rows_by_id[
+                            unit.deliverable.deliverable_id
+                        ].contradiction_type,
                     }
                     for unit in sorted(units, key=lambda item: item.deliverable.deliverable_id)
                 ],
@@ -153,6 +176,16 @@ def build_evaluation_v3_units(
             deliverable_id=requirement_key,
             chunks=payload.get("retrieved_record_sections", []),
         )
+        for chunk in record_chunks:
+            print(
+                {
+                    "stage": "evaluation_v3_service.record_chunks",
+                    "deliverable_id": requirement_key,
+                    "text": str(chunk.get("text") or "")[:80],
+                    "retrieval_score": chunk.get("retrieval_score"),
+                    "raw_retrieval_score": chunk.get("raw_retrieval_score"),
+                }
+            )
         reference_chunks = _with_reference_ids(
             deliverable_id=requirement_key,
             chunks=payload.get("retrieved_requirement_context", []),
@@ -266,13 +299,32 @@ def _ensure_evaluation_v3_runtime_dir() -> None:
 
 
 def _build_evaluation_v3_trace_metadata(*, model_name: str, timestamp: str) -> dict[str, Any]:
-    return {
-        "config": {
-            "grounding_threshold": evaluation_v3_config["GROUNDING_SCORE_THRESHOLD"],
-            "subsection_threshold": evaluation_v3_config["SUBSECTION_COVERAGE_THRESHOLD"],
-        },
+    trace_metadata: dict[str, Any] = {
         "model_name": model_name,
         "timestamp": timestamp,
+    }
+    public_config = _build_evaluation_v3_public_config()
+    diagnostic_config = _build_evaluation_v3_diagnostic_config()
+    if public_config:
+        trace_metadata["config"] = public_config
+    if diagnostic_config:
+        trace_metadata["diagnostic_config"] = diagnostic_config
+    return trace_metadata
+
+
+def _build_evaluation_v3_public_config() -> dict[str, Any]:
+    return {
+        "label_logic": "accepted_evidence_count",
+        "max_required_evidence_count": 5,
+        "coverage_used_for_label": False,
+    }
+
+
+def _build_evaluation_v3_diagnostic_config() -> dict[str, Any]:
+    return {
+        "grounding_threshold": evaluation_v3_config["GROUNDING_SCORE_THRESHOLD"],
+        "grounding_top_n": evaluation_v3_config["GROUNDING_TOP_N"],
+        "subsection_threshold": evaluation_v3_config["SUBSECTION_COVERAGE_THRESHOLD"],
     }
 
 
@@ -343,10 +395,16 @@ def _write_debug_reports(
 def _write_debug_csv(*, csv_path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = [
         "deliverable_id",
+        "requirement_type",
+        "base_required_evidence_count",
+        "weight",
+        "weight_modifier",
+        "required_evidence_count_reason",
         "final_label",
         "evidence_status",
         "required_evidence_count",
         "grounded_evidence_count",
+        "grounded_chunk_count",
         "grounded_subsection_count",
         "has_conflict",
         "subsection_count",
@@ -387,26 +445,50 @@ def _build_stage_output(
     linked_row: Any | None,
     supporting_reference_ids: list[str] | None = None,
 ) -> dict[str, Any] | None:
+    # Evaluation V3 metrics (ground truth)
+    # Uses grounded evidence and retrieval.
+    # IMPORTANT: evaluation_v3 must not read or depend on legacy finding.status.
     if finding is None and linked_row is None:
         return None
-    evidence_items = finding.evidence_items if finding is not None else []
-    rationale = linked_row.rationale if linked_row is not None else ""
+    evidence_items = list(_payload_value(finding, "evidence_items", [])) if finding is not None else []
+    rationale = str(_payload_value(linked_row, "rationale", "")) if linked_row is not None else ""
     reference_ids = supporting_reference_ids or []
+    label = _derive_stage_label_from_grounding(
+        rationale=rationale,
+        evidence_items=evidence_items,
+        supporting_reference_ids=reference_ids,
+    )
+    contradiction_type = _pick_highest_priority_contradiction(
+        [
+            _payload_value(finding, "contradiction_type", None),
+            _payload_value(linked_row, "contradiction_type", None),
+        ]
+    )
+    conflict_flag = any(
+        _coerce_bool_flag(value)
+        for value in (
+            _payload_value(finding, "conflict_flag", None),
+            _payload_value(linked_row, "conflict_flag", None),
+        )
+    )
     return {
-        "label": _derive_v3_stage_label(
-            rationale=rationale,
-            evidence_items=evidence_items,
-            supporting_reference_ids=reference_ids,
-        ),
+        "label": label,
         "rationale": rationale,
-        "evidence": finding.evidence if finding is not None else [],
+        "evidence": list(_payload_value(finding, "evidence", [])) if finding is not None else [],
         "evidence_items": [
             {
-                "text": item.text,
-                "source_document": item.source_document,
+                "evidence_id": _payload_value(item, "evidence_id", ""),
+                "section_id": _payload_value(item, "section_id", ""),
+                "subsection_id": _payload_value(item, "subsection_id", ""),
+                "section_label": _payload_value(item, "section_label", ""),
+                "heading_title": _payload_value(item, "heading_title", ""),
+                "source_document": _payload_value(item, "source_document", ""),
+                "text": _payload_value(item, "text", ""),
             }
             for item in evidence_items
         ],
+        "conflict_flag": conflict_flag,
+        "contradiction_type": contradiction_type,
         "supporting_reference_ids": reference_ids,
     }
 
@@ -518,8 +600,13 @@ def _map_stage_findings_to_keys(
             source_name=f"{stage_key}.findings",
         )
         if requirement_key in mapped:
-            raise ValueError(f"Duplicate evaluation_v3 stage finding key for {stage_key}: {requirement_key}")
-        mapped[requirement_key] = finding
+            logger.warning("Duplicate findings merged for deliverable_id=%s", requirement_key)
+            mapped[requirement_key] = _merge_duplicate_finding(
+                existing=mapped[requirement_key],
+                incoming=finding,
+            )
+            continue
+        mapped[requirement_key] = _finding_to_payload(finding)
     return mapped
 
 
@@ -537,9 +624,192 @@ def _map_stage_linked_rows_to_keys(
             source_name=f"{stage_key}.linked_rows",
         )
         if requirement_key in mapped:
-            raise ValueError(f"Duplicate evaluation_v3 linked row key for {stage_key}: {requirement_key}")
-        mapped[requirement_key] = linked_row
+            logger.warning("Duplicate linked rows merged for deliverable_id=%s", requirement_key)
+            mapped[requirement_key] = _merge_duplicate_linked_row(
+                existing=mapped[requirement_key],
+                incoming=linked_row,
+            )
+            continue
+        mapped[requirement_key] = _linked_row_to_payload(linked_row)
     return mapped
+
+
+def _payload_value(payload: Any, key: str, default: Any = None) -> Any:
+    if isinstance(payload, dict):
+        return payload.get(key, default)
+    return getattr(payload, key, default)
+
+
+def _derive_stage_label_from_grounding(
+    *,
+    rationale: str,
+    evidence_items: list[Any],
+    supporting_reference_ids: list[str],
+) -> str | None:
+    normalized_rationale = " ".join(str(rationale or "").split()).strip().lower()
+    if _has_direct_conflict_marker(normalized_rationale):
+        return "not_satisfied"
+    if any(_has_direct_conflict_marker(_payload_value(item, "text", "")) for item in evidence_items):
+        return "not_satisfied"
+    grounded_evidence_items = [
+        item
+        for item in evidence_items
+        if _payload_value(item, "source_document", None)
+    ]
+    if grounded_evidence_items:
+        return "satisfied"
+    if supporting_reference_ids:
+        return "partial"
+    if normalized_rationale:
+        return "partial"
+    return None
+
+
+def _pick_highest_priority_contradiction(values: list[object]) -> str:
+    normalized_values = {
+        str(value or "").strip().lower().replace(" ", "_")
+        for value in values
+        if str(value or "").strip()
+    }
+    for item in CONTRADICTION_PRIORITY:
+        if item in normalized_values:
+            return item
+    return "none"
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def _coerce_bool_flag(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value or "").strip().lower()
+    return normalized in {"true", "1", "yes", "y"}
+
+
+def _merge_unique_rationales(values: list[object]) -> str:
+    normalized = [
+        " ".join(str(value or "").split()).strip()
+        for value in values
+    ]
+    unique = [value for value in _dedupe_preserve_order(normalized) if value]
+    merged = " | ".join(unique)
+    if len(merged) <= MAX_MERGED_RATIONALE_LENGTH:
+        return merged
+    return merged[: MAX_MERGED_RATIONALE_LENGTH - 3].rstrip() + "..."
+
+
+def _merge_evidence_items(values: list[Any]) -> list[dict[str, str]]:
+    merged: list[dict[str, str]] = []
+    for value in values:
+        normalized = {
+            "evidence_id": " ".join(str(_payload_value(value, "evidence_id", "") or "").split()).strip(),
+            "section_id": " ".join(str(_payload_value(value, "section_id", "") or "").split()).strip(),
+            "subsection_id": " ".join(str(_payload_value(value, "subsection_id", "") or "").split()).strip(),
+            "section_label": " ".join(str(_payload_value(value, "section_label", "") or "").split()).strip(),
+            "heading_title": " ".join(str(_payload_value(value, "heading_title", "") or "").split()).strip(),
+            "source_document": " ".join(str(_payload_value(value, "source_document", "") or "").split()).strip(),
+            "text": " ".join(str(_payload_value(value, "text", "") or "").split()).strip(),
+        }
+        if not normalized["text"]:
+            continue
+        if normalized in merged:
+            continue
+        merged.append(normalized)
+    return merged
+
+
+def _finding_to_payload(finding: Any) -> dict[str, Any]:
+    return {
+        "requirement": str(_payload_value(finding, "requirement", "") or ""),
+        "evidence": _dedupe_preserve_order(
+            [
+                " ".join(str(item or "").split()).strip()
+                for item in list(_payload_value(finding, "evidence", []))
+                if " ".join(str(item or "").split()).strip()
+            ]
+        ),
+        "source_document": str(_payload_value(finding, "source_document", "") or ""),
+        "evidence_items": _merge_evidence_items(list(_payload_value(finding, "evidence_items", []))),
+        "conflict_flag": bool(_payload_value(finding, "conflict_flag", False)),
+        "contradiction_type": _pick_highest_priority_contradiction(
+            [_payload_value(finding, "contradiction_type", None)]
+        ),
+        "_duplicate_merged": bool(_payload_value(finding, "_duplicate_merged", False)),
+    }
+
+
+def _linked_row_to_payload(linked_row: Any) -> dict[str, Any]:
+    return {
+        "requirement": str(_payload_value(linked_row, "requirement", "") or ""),
+        "requirement_ref": str(_payload_value(linked_row, "requirement_ref", "") or ""),
+        "rationale": " ".join(str(_payload_value(linked_row, "rationale", "") or "").split()).strip(),
+        "record_recall_at_k": _payload_value(linked_row, "record_recall_at_k", None),
+        "conflict_flag": bool(_payload_value(linked_row, "conflict_flag", False)),
+        "contradiction_type": _pick_highest_priority_contradiction(
+            [_payload_value(linked_row, "contradiction_type", None)]
+        ),
+        "_duplicate_merged": bool(_payload_value(linked_row, "_duplicate_merged", False)),
+    }
+
+
+def _merge_duplicate_finding(*, existing: Any, incoming: Any) -> dict[str, Any]:
+    left = _finding_to_payload(existing)
+    right = _finding_to_payload(incoming)
+    merged_evidence_items = _merge_evidence_items(
+        [*left.get("evidence_items", []), *right.get("evidence_items", [])]
+    )
+    merged_evidence = _dedupe_preserve_order(
+        [
+            *list(left.get("evidence", [])),
+            *list(right.get("evidence", [])),
+        ]
+    )
+    return {
+        "requirement": str(left.get("requirement") or right.get("requirement") or ""),
+        "evidence": merged_evidence,
+        "source_document": str(
+            left.get("source_document")
+            or right.get("source_document")
+            or next(
+                (
+                    item.get("source_document", "")
+                    for item in merged_evidence_items
+                    if item.get("source_document")
+                ),
+                "",
+            )
+        ),
+        "evidence_items": merged_evidence_items,
+        "conflict_flag": bool(left.get("conflict_flag")) or bool(right.get("conflict_flag")),
+        "contradiction_type": _pick_highest_priority_contradiction(
+            [left.get("contradiction_type"), right.get("contradiction_type")]
+        ),
+        "_duplicate_merged": True,
+    }
+
+
+def _merge_duplicate_linked_row(*, existing: Any, incoming: Any) -> dict[str, Any]:
+    left = _linked_row_to_payload(existing)
+    right = _linked_row_to_payload(incoming)
+    recall_candidates = [
+        value for value in (left.get("record_recall_at_k"), right.get("record_recall_at_k"))
+        if isinstance(value, (int, float))
+    ]
+    return {
+        "requirement": str(left.get("requirement") or right.get("requirement") or ""),
+        "requirement_ref": str(left.get("requirement_ref") or right.get("requirement_ref") or ""),
+        "rationale": _merge_unique_rationales([left.get("rationale"), right.get("rationale")]),
+        "record_recall_at_k": max(recall_candidates) if recall_candidates else None,
+        "conflict_flag": bool(left.get("conflict_flag")) or bool(right.get("conflict_flag")),
+        "contradiction_type": _pick_highest_priority_contradiction(
+            [left.get("contradiction_type"), right.get("contradiction_type")]
+        ),
+        "_duplicate_merged": True,
+    }
 
 
 def _validate_source_keys(
@@ -636,7 +906,12 @@ def _build_requirement_ref(index: int) -> str:
 
 
 def _normalize_alignment_text(value: object) -> str:
-    return " ".join(str(value or "").split()).strip()
+    normalized = " ".join(str(value or "").split()).strip().lower()
+    if not normalized:
+        return ""
+    normalized = normalized.rstrip(".,:;")
+    normalized = normalized.replace(" for the risk reduction", " for risk reduction")
+    return normalized
 
 
 def _with_record_ids(*, deliverable_id: str, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -669,32 +944,6 @@ def _deliverable_id(index: int) -> str:
 
 def _current_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _derive_v3_stage_label(
-    *,
-    rationale: str,
-    evidence_items: list[Any],
-    supporting_reference_ids: list[str],
-) -> str | None:
-    normalized_rationale = " ".join(str(rationale or "").split()).strip().lower()
-    if _has_direct_conflict_marker(normalized_rationale):
-        return "not_satisfied"
-
-    if any(_has_direct_conflict_marker(getattr(item, "text", "")) for item in evidence_items):
-        return "not_satisfied"
-
-    grounded_evidence_items = [
-        item
-        for item in evidence_items
-        if getattr(item, "source_document", None)
-    ]
-    if grounded_evidence_items or supporting_reference_ids:
-        return "satisfied"
-
-    if normalized_rationale:
-        return "partial"
-    return None
 
 
 def _has_direct_conflict_marker(value: object) -> bool:

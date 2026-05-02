@@ -18,7 +18,7 @@ from app.services.storage_paths import (
     get_procedure_document_extraction_latest_path,
 )
 
-PROMPT_VERSION = "deliverable_extraction_v4_record_auditable"
+PROMPT_VERSION = "v1_experiment"
 
 OBLIGATION_TERMS = ("shall", "must", "required", "needs to")
 EXCLUDED_HEADINGS = {
@@ -208,7 +208,7 @@ def serialize_section_for_prompt(section: dict[str, Any]) -> dict[str, Any]:
                 "table_markdown": table.get("table_markdown"),
             }
         )
-    return {
+    payload = {
         "section_ref": section.get("section_ref"),
         "source_document": section.get("source_document"),
         "section_label": section.get("section_label"),
@@ -216,10 +216,51 @@ def serialize_section_for_prompt(section: dict[str, Any]) -> dict[str, Any]:
         "text": section.get("text"),
         "tables": serialized_tables,
     }
+    return _drop_empty_prompt_fields(payload)
 
 
 def serialize_sections_for_prompt(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [serialize_section_for_prompt(section) for section in sections]
+
+
+def serialize_sections_for_prompt_legacy(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for section in sections:
+        tables = section.get("tables", [])
+        serialized_tables: list[dict[str, Any]] = []
+        for table in tables[:6]:
+            serialized_tables.append(
+                {
+                    "headers": table.get("headers", []),
+                    "table_markdown": table.get("table_markdown"),
+                }
+            )
+        serialized.append(
+            {
+                "section_ref": section.get("section_ref"),
+                "source_document": section.get("source_document"),
+                "section_label": section.get("section_label"),
+                "heading_title": section.get("heading_title"),
+                "text": section.get("text"),
+                "tables": serialized_tables,
+            }
+        )
+    return serialized
+
+
+def _drop_empty_prompt_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        compacted: dict[str, Any] = {}
+        for key, item in value.items():
+            compacted_item = _drop_empty_prompt_fields(item)
+            if compacted_item in (None, "", [], {}):
+                continue
+            compacted[key] = compacted_item
+        return compacted
+    if isinstance(value, list):
+        compacted_list = [_drop_empty_prompt_fields(item) for item in value]
+        return [item for item in compacted_list if item not in (None, "", [], {})]
+    return value
 
 
 def postprocess_deliverables(

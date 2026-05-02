@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Any
 from uuid import uuid4
 
 from pydantic import ValidationError
+
+from evaluation_v3 import derive_deliverable_requirement_metadata
 
 from app.schemas.compliance import (
     ComplianceAnalysis,
@@ -26,10 +29,8 @@ from app.services.llm.json_utils import extract_json_object
 from app.services.retrieval.faiss_retrieval import normalize_whitespace
 from app.services.storage_paths import get_case_compliance_dir
 
+PROMPT_VERSION = "v1_experiment"
 PROMPT_FAMILY = "canonical_compliance_v2_relaxed"
-MIN_SATISFIED_EVIDENCE_ITEMS = 1
-MIN_SATISFIED_SOURCE_DOCUMENTS = 1
-MIN_STRONG_CLAIM_EVIDENCE_ITEMS = 2
 MIN_SUBSTANTIVE_SECTION_TEXT_LENGTH = 40
 MIN_SUBSTANTIVE_SECTION_TOKEN_COUNT = 6
 STATUS_COMPLETION_SCORES = {
@@ -37,6 +38,79 @@ STATUS_COMPLETION_SCORES = {
     "partial": 33,
     "not_satisfied": 0,
 }
+# Legacy compliance metrics (UI tables only)
+# Deprecated: do not use for evaluation.
+VALID_STATUSES = {"satisfied", "partial", "not_satisfied"}
+FINDING_CONTRADICTION_PHRASES = (
+    "does not",
+    "not clearly",
+    "no evidence",
+    "missing",
+    "unclear",
+)
+log = logging.getLogger(__name__)
+
+
+def _normalize_finding_status(status: object) -> str:
+    # IMPORTANT:
+    # Status must come ONLY from LLM output.
+    # Evidence presence must NOT upgrade status.
+    normalized = str(status or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized not in VALID_STATUSES:
+        log.warning("Invalid status '%s', defaulting to partial", status)
+        return "partial"
+    return normalized
+
+
+def validate_finding_consistency(finding: Any) -> None:
+    rationale = str(
+        finding.get("rationale", "")
+        if isinstance(finding, dict)
+        else getattr(finding, "rationale", "")
+    ).lower()
+    status = (
+        finding.get("status")
+        if isinstance(finding, dict)
+        else getattr(finding, "status", None)
+    )
+    if any(phrase in rationale for phrase in FINDING_CONTRADICTION_PHRASES):
+        if status == "satisfied":
+            requirement_ref = (
+                finding.get("requirement_ref")
+                if isinstance(finding, dict)
+                else getattr(finding, "requirement_ref", None)
+            )
+            log.warning(
+                "Contradiction: status=%s but rationale indicates missing evidence. Requirement: %s",
+                status,
+                requirement_ref,
+            )
+
+
+def _completion_score_for_finding(finding: ComplianceFinding) -> int:
+    # IMPORTANT:
+    # Completion scoring must use ONLY finding.status.
+    # Evidence strength and coverage are separate metrics and must not affect completion.
+    # Legacy compliance metrics (UI tables only)
+    # Deprecated: do not use for evaluation.
+    return STATUS_COMPLETION_SCORES.get(finding.status, 0)
+
+
+def log_findings_compact_table(
+    findings: list[ComplianceFinding],
+    linked_rows: list[ComplianceLinkedRow],
+) -> None:
+    for index, finding in enumerate(findings):
+        row = linked_rows[index] if index < len(linked_rows) else None
+        print(
+            {
+                "req": row.requirement_ref if row else "",
+                "status": finding.status,
+                "evidence_count": len(finding.evidence_items or []),
+                "evidence_strength": finding.evidence_strength,
+                "rationale": (row.rationale if row and row.rationale else "")[:120],
+            }
+        )
 
 
 def execute_compliance_method(
@@ -123,7 +197,7 @@ def build_shared_output_instructions(
     output_structure = [
         "{",
         linked_row_shape,
-        '"procedure_to_record":[{"requirement":"...","evidence":["verbatim or near-verbatim short quotes"],"source_document":"record-file-name"}]',
+        '"procedure_to_record":[{"requirement_id":"REQ-1","requirement":"...","status":"partial","evidence":["record quote 1","record quote 2"],"evidence_items":[{"text":"record quote 1","source_document":"record-file-name"},{"text":"record quote 2","source_document":"record-file-name"}],"source_document":"record-file-name","rationale":"short requirement-level rationale"}]',
         "}",
     ]
     return [
@@ -140,14 +214,16 @@ def build_shared_output_instructions(
         "Assessment guidance:",
         "- Break each requirement into the concrete elements it requires.",
         "- Check each element against admissible evidence only.",
-        "- The backend will derive compliance status from the grounded evidence you return.",
-        "- Your job is to return grounded evidence, the source document, and a short rationale describing how well the record supports the requirement.",
+        "- Set status explicitly for each requirement using only: satisfied, partial, or not_satisfied.",
+        "- Your job is to return status, grounded evidence, the source document, and a short rationale describing how well the record supports the requirement.",
         "- Prefer substance over exact wording, but require the record evidence to establish the required point clearly. Treat equivalent wording or structured evidence conservatively unless it directly covers the required element.",
         "- Do not require a specific record layout, heading name, table shape, or wording pattern unless the requirement explicitly requires it.",
         "- Do not penalize a record merely because evidence appears in a different section, format, or phrasing than the procedure text.",
         "- A matching heading, title, or section number alone is never sufficient evidence. Use the section body text or table content, not structure alone, to justify compliance.",
         "- Be careful with indirect or summarized support. Do not treat indirect or inferred support as satisfied unless it clearly establishes the required element.",
         "- If a deliverable indicates broader subsection coverage expectations, use satisfied only when the evidence spans enough distinct relevant subsection areas rather than one local mention.",
+        "- For each requirement, use required_evidence_count as the target number of independent record evidence quotes. Try to provide up to that many distinct quotes in procedure_to_record.evidence. Evidence quotes must come only from the record document. Do not invent quotes. If fewer valid quotes are found, return only the valid quotes and explain what is missing.",
+        "- When multiple evidence_items are requested, prefer quotes from different rows, functions, controls, subsections, or statements. Do not repeat the same quote with minor wording changes.",
         "- Reference context may clarify requirement meaning, but it does not create additional required fields or record structure beyond the requirement itself.",
         "- For conditional requirements such as 'where necessary' or 'in cases where', first assess whether the triggering condition is evidenced in the admissible record.",
         "- If the trigger is not evidenced, do not assume the condition occurred.",
@@ -170,7 +246,22 @@ def build_shared_output_instructions(
             if single_requirement
             else "- Use requirement_ref values REQ-1, REQ-2, and so on, matching the input order."
         ),
+        (
+            "- Return exactly one procedure_to_record item and exactly one linked_rows item for the single input requirement. Do not omit the requirement. If no evidence is found, still return an item with status=\"not_satisfied\", evidence=[], evidence_items=[], and rationale."
+            if single_requirement
+            else "- Return exactly one procedure_to_record item for every input requirement. Do not omit requirements. If no evidence is found, still return an item with status=\"not_satisfied\", evidence=[], evidence_items=[], and rationale."
+        ),
+        (
+            "- Set procedure_to_record.requirement_id to REQ-1."
+            if single_requirement
+            else "- Set each procedure_to_record.requirement_id to the matching input requirement_ref value, using REQ-1, REQ-2, and so on in order."
+        ),
+        "- Allowed status values only: satisfied, partial, not_satisfied.",
         "- Every procedure_to_record.source_document value must refer only to a record document filename from this case.",
+        "- Every procedure_to_record item must include: requirement_id, requirement, status, evidence, evidence_items, source_document, and rationale.",
+        "- The evidence array should contain up to required_evidence_count distinct record quotes when available. Do not include reference quotes. If fewer quotes are available, include only valid quotes and explain missing evidence in rationale.",
+        "- evidence_items must mirror the returned record quotes when used. Each evidence_items entry should contain the quote text and its source_document. If no valid record evidence exists, return evidence_items=[].",
+        "- Set procedure_to_record.rationale to one short plain-text sentence grounded in the admissible record evidence, or a short missing-evidence explanation when evidence is absent.",
         "- For every requirement, set linked_rows.rationale to one short plain-text sentence grounded in the admissible record evidence.",
         "- Do not generate gaps, recommendations, or recommended_actions.",
         "- Do not generate status fields in linked_rows.",
@@ -200,6 +291,7 @@ def build_method_specific_constraints(method: ComplianceMethod | str) -> list[st
         *shared,
         "- Use ONLY retrieved_record_sections as admissible compliance evidence.",
         "- Use retrieved_requirement_context only to interpret the meaning of a requirement.",
+        "- Reference context may clarify what to look for, but evidence_items must still come only from retrieved_record_sections.",
         "- Never use retrieved_requirement_context as compliance evidence and never cite reference documents in source_document.",
         "- Evaluate each requirement from scratch using the provided deliverable, retrieved_record_sections, and retrieved_requirement_context.",
         "- Do not rely on any full record document outside retrieved_record_sections.",
@@ -208,6 +300,37 @@ def build_method_specific_constraints(method: ComplianceMethod | str) -> list[st
 
 
 def build_compliance_prompt(
+    *,
+    method: ComplianceMethod | str,
+    payload: dict[str, Any],
+    instructions: str | None,
+    single_requirement: bool = False,
+    include_feedback: bool = False,
+) -> str:
+    compact_payload = _compact_compliance_prompt_payload(payload)
+    before_prompt = _build_compliance_prompt_text(
+        method=method,
+        payload=payload,
+        instructions=instructions,
+        single_requirement=single_requirement,
+        include_feedback=include_feedback,
+    )
+    after_prompt = _build_compliance_prompt_text(
+        method=method,
+        payload=compact_payload,
+        instructions=instructions,
+        single_requirement=single_requirement,
+        include_feedback=include_feedback,
+    )
+    print(
+        f"[PROMPT] version={PROMPT_VERSION} family={PROMPT_FAMILY} "
+        f"before_prompt_length={len(before_prompt)} after_prompt_length={len(after_prompt)}",
+        flush=True,
+    )
+    return after_prompt
+
+
+def _build_compliance_prompt_text(
     *,
     method: ComplianceMethod | str,
     payload: dict[str, Any],
@@ -258,6 +381,19 @@ def extract_allowed_record_documents(case_payload: dict[str, Any] | dict[str, ob
 
 def simplify_document_for_prompt(document: dict[str, Any]) -> dict[str, Any]:
     parsed_json = document.get("parsed_json") or {}
+    return _drop_empty_prompt_fields(
+        {
+            "document_type": document.get("document_type"),
+            "source_filename": document.get("source_filename") or document.get("stored_filename"),
+            "parsed_json": {
+                "sections": parsed_json.get("sections", []),
+            },
+        }
+    )
+
+
+def _legacy_simplify_document_for_prompt(document: dict[str, Any]) -> dict[str, Any]:
+    parsed_json = document.get("parsed_json") or {}
     return {
         "document_type": document.get("document_type"),
         "source_filename": document.get("source_filename"),
@@ -293,6 +429,26 @@ def build_requirement_query_text(deliverable: dict[str, Any]) -> str:
 
 
 def serialize_retrieved_section(chunk: dict[str, Any]) -> dict[str, Any]:
+    return _drop_empty_prompt_fields(
+        {
+            "source_document": chunk.get("source_document"),
+            "section_id": chunk.get("section_id"),
+            "subsection_id": chunk.get("subsection_id") or chunk.get("section_id"),
+            "section_label": chunk.get("section_label"),
+            "heading_title": chunk.get("heading_title"),
+            "text": chunk.get("text"),
+            "table_markdown": chunk.get("table_markdown"),
+
+            # KEEP THESE
+            "faiss_score": chunk.get("faiss_score"),
+            "reranker_score": chunk.get("reranker_score"),
+            "raw_retrieval_score": chunk.get("raw_retrieval_score"),
+            "retrieval_score": chunk.get("retrieval_score"),
+        }
+    )
+
+
+def _legacy_serialize_retrieved_section(chunk: dict[str, Any]) -> dict[str, Any]:
     return {
         "source_document": chunk.get("source_document"),
         "section_id": chunk.get("section_id"),
@@ -309,6 +465,23 @@ def serialize_retrieved_section(chunk: dict[str, Any]) -> dict[str, Any]:
 
 
 def serialize_deliverable_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
+    requirement_metadata = derive_deliverable_requirement_metadata(item)
+    return _drop_empty_prompt_fields(
+        {
+            "source_document": item.get("source_document"),
+            "section_label": item.get("section_label"),
+            "heading_title": item.get("heading_title"),
+            "requirement_text": item.get("requirement_text"),
+            "source_quote": item.get("source_quote"),
+            "weight": requirement_metadata.get("weight", item.get("weight")),
+            "requirement_type": requirement_metadata.get("requirement_type"),
+            "required_evidence_count": requirement_metadata.get("required_evidence_count"),
+            "expected_evidence_breadth": item.get("expected_evidence_breadth"),
+        }
+    )
+
+
+def _legacy_serialize_deliverable_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "source_document": item.get("source_document"),
         "section_label": item.get("section_label"),
@@ -319,6 +492,25 @@ def serialize_deliverable_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
         "expected_evidence_breadth": item.get("expected_evidence_breadth"),
         "retrieval_score": item.get("retrieval_score"),
     }
+
+
+def _compact_compliance_prompt_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return _drop_empty_prompt_fields(payload)
+
+
+def _drop_empty_prompt_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        compacted: dict[str, Any] = {}
+        for key, item in value.items():
+            compacted_item = _drop_empty_prompt_fields(item)
+            if compacted_item in (None, "", [], {}):
+                continue
+            compacted[key] = compacted_item
+        return compacted
+    if isinstance(value, list):
+        compacted_list = [_drop_empty_prompt_fields(item) for item in value]
+        return [item for item in compacted_list if item not in (None, "", [], {})]
+    return value
 
 
 def annotate_deliverable_structure(deliverables: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -456,26 +648,25 @@ def normalize_requirement_finding(
     retrieved_record_sections: list[dict[str, Any]],
     allowed_record_documents: set[str],
 ) -> ComplianceFinding:
-    normalized_evidence = normalize_string_list(finding.evidence)
+    fallback_documents = [item.get("source_document") for item in retrieved_record_sections]
+    normalized_items = _normalize_preserved_evidence_items(
+        evidence_items=finding.evidence_items,
+        allowed_record_documents=allowed_record_documents,
+        fallback_documents=fallback_documents,
+    )
+    normalized_evidence = _merge_evidence_texts(
+        normalize_string_list(finding.evidence),
+        [item.text for item in normalized_items],
+    )
     normalized = finding.model_copy(
         update={
             "source_document": sanitize_source_document(
                 finding.source_document,
                 allowed=allowed_record_documents,
-                fallback=[item.get("source_document") for item in retrieved_record_sections],
+                fallback=fallback_documents,
             ),
             "evidence": normalized_evidence,
-            "evidence_items": [
-                ComplianceEvidenceItem(
-                    text=evidence,
-                    source_document=sanitize_source_document(
-                        finding.source_document,
-                        allowed=allowed_record_documents,
-                        fallback=[item.get("source_document") for item in retrieved_record_sections],
-                    ),
-                )
-                for evidence in normalized_evidence
-            ],
+            "evidence_items": normalized_items,
         }
     )
     return verify_finding_against_retrieved_sections(
@@ -502,7 +693,7 @@ def normalize_requirement_linked_row(
 def compute_completion_percent(findings: list[ComplianceFinding]) -> int:
     if not findings:
         return 0
-    total_score = sum(STATUS_COMPLETION_SCORES.get(finding.status, 0) for finding in findings)
+    total_score = sum(_completion_score_for_finding(finding) for finding in findings)
     return round(total_score / len(findings))
 
 # DEPRECATED: legacy scoring, not used in evaluation_v3
@@ -513,7 +704,7 @@ def compute_weighted_completion_percent(findings: list[ComplianceFinding]) -> in
     if total_weight <= 0:
         return compute_completion_percent(findings)
     total_score = sum(
-        STATUS_COMPLETION_SCORES.get(finding.status, 0) * float(finding.weight or 0.0)
+        _completion_score_for_finding(finding) * float(finding.weight or 0.0)
         for finding in findings
     )
     return round(total_score / total_weight)
@@ -563,6 +754,9 @@ def compute_weighted_average_evidence_strength(findings: list[ComplianceFinding]
 
 # DEPRECATED: legacy scoring, not used in evaluation_v3
 def apply_computed_analysis_metrics(analysis: ComplianceAnalysis) -> ComplianceAnalysis:
+    # Legacy compliance metrics (UI tables only)
+    # Deprecated: do not use for evaluation.
+    # IMPORTANT: compliance scoring must not read evaluation_v3 outputs.
     findings = analysis.procedure_to_record or analysis.findings
     completion_percent = compute_completion_percent(findings)
     weighted_completion_percent = compute_weighted_completion_percent(findings)
@@ -610,6 +804,16 @@ def assemble_compliance_analysis(
     linked_rows: list[ComplianceLinkedRow] | None = None,
 ) -> ComplianceAnalysis:
     resolved_rows = build_linked_rows_from_findings(findings, existing_rows=linked_rows)
+    log_findings_compact_table(findings, resolved_rows)
+    for index, finding in enumerate(findings):
+        row = resolved_rows[index] if index < len(resolved_rows) else None
+        validate_finding_consistency(
+            {
+                "status": finding.status,
+                "rationale": row.rationale if row else "",
+                "requirement_ref": row.requirement_ref if row else "",
+            }
+        )
     analysis = ComplianceAnalysis(
         completion_percent=0,
         weighted_completion_percent=0,
@@ -680,13 +884,11 @@ def verify_finding_against_retrieved_sections(
             "evidence": supported_evidence,
             "source_document": next_source,
             "evidence_breadth": evidence_breadth,
-            "evidence_items": [
-                ComplianceEvidenceItem(
-                    text=evidence,
-                    source_document=next_source,
-                )
-                for evidence in supported_evidence
-            ],
+            "evidence_items": _select_supported_evidence_items(
+                evidence_items=finding.evidence_items,
+                supported_evidence=supported_evidence,
+                fallback_source_document=next_source,
+            ),
         }
     )
     return _apply_evidence_thresholds(verified)
@@ -709,13 +911,11 @@ def verify_finding_against_full_record_sections(
             "evidence": supported_evidence,
             "source_document": next_source,
             "evidence_breadth": evidence_breadth,
-            "evidence_items": [
-                ComplianceEvidenceItem(
-                    text=evidence,
-                    source_document=next_source,
-                )
-                for evidence in supported_evidence
-            ],
+            "evidence_items": _select_supported_evidence_items(
+                evidence_items=finding.evidence_items,
+                supported_evidence=supported_evidence,
+                fallback_source_document=next_source,
+            ),
         }
     )
     return _apply_evidence_thresholds(verified)
@@ -879,6 +1079,15 @@ def _normalize_finding_source_document(
             }
         )
         return _apply_evidence_thresholds(normalized)
+    normalized_items = _normalize_preserved_evidence_items(
+        evidence_items=finding.evidence_items,
+        allowed_record_documents=allowed_record_documents,
+        fallback_documents=[],
+    )
+    normalized_evidence = _merge_evidence_texts(
+        normalized_evidence,
+        [item.text for item in normalized_items],
+    )
     normalized = finding.model_copy(
         update={
             "evidence": normalized_evidence,
@@ -887,17 +1096,7 @@ def _normalize_finding_source_document(
                 allowed=allowed_record_documents,
                 fallback=[],
             ),
-            "evidence_items": [
-                ComplianceEvidenceItem(
-                    text=evidence,
-                    source_document=sanitize_source_document(
-                        finding.source_document,
-                        allowed=allowed_record_documents,
-                        fallback=[],
-                    ),
-                )
-                for evidence in normalized_evidence
-            ],
+            "evidence_items": normalized_items,
         }
     )
     return _apply_evidence_thresholds(normalized)
@@ -921,24 +1120,9 @@ def _apply_evidence_thresholds(finding: ComplianceFinding) -> ComplianceFinding:
             for text in evidence
         ]
     )
-    grounded_count = sum(
-        1
-        for item in evidence_items
-        if (
-            normalize_whitespace(item.text)
-            and normalize_whitespace(item.source_document)
-        )
-    )
-
-    next_status = _derive_status_from_grounded_evidence(
-        requirement=finding.requirement,
-        grounded_count=grounded_count,
-        has_source_document=bool(source_document),
-    )
-
     return finding.model_copy(
         update={
-            "status": next_status,
+            "status": _normalize_finding_status(finding.status),
             "evidence": evidence,
             "source_document": source_document,
             "evidence_items": evidence_items,
@@ -946,40 +1130,85 @@ def _apply_evidence_thresholds(finding: ComplianceFinding) -> ComplianceFinding:
     )
 
 
-def _derive_status_from_grounded_evidence(
+def _normalize_evidence_item_key(value: object) -> str:
+    return normalize_whitespace(str(value or "")).lower()
+
+
+def _merge_evidence_texts(primary: list[str], secondary: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in [*primary, *secondary]:
+        normalized = normalize_whitespace(value)
+        key = _normalize_evidence_item_key(normalized)
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        merged.append(normalized)
+    return merged
+
+
+def _normalize_preserved_evidence_items(
     *,
-    requirement: str,
-    grounded_count: int,
-    has_source_document: bool,
-) -> str:
-    if grounded_count <= 0 or not has_source_document:
-        return "not_satisfied"
-    required_evidence_items = (
-        MIN_STRONG_CLAIM_EVIDENCE_ITEMS
-        if _requires_multiple_citations(requirement)
-        else MIN_SATISFIED_EVIDENCE_ITEMS
-    )
-    if grounded_count >= required_evidence_items:
-        return "satisfied"
-    return "partial"
+    evidence_items: list[ComplianceEvidenceItem],
+    allowed_record_documents: set[str],
+    fallback_documents: list[object],
+) -> list[ComplianceEvidenceItem]:
+    normalized_items: list[ComplianceEvidenceItem] = []
+    seen: set[str] = set()
+    for item in evidence_items:
+        text = normalize_whitespace(item.text)
+        key = _normalize_evidence_item_key(text)
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        normalized_items.append(
+            item.model_copy(
+                update={
+                    "text": text,
+                    "source_document": sanitize_source_document(
+                        item.source_document,
+                        allowed=allowed_record_documents,
+                        fallback=fallback_documents,
+                    ),
+                }
+            )
+        )
+    return normalized_items
 
 
-def _requires_multiple_citations(requirement: str) -> bool:
-    text = normalize_whitespace(requirement).lower()
-    if not text:
-        return False
-    markers = (
-        " both ",
-        " each ",
-        " all ",
-        " including ",
-        " include ",
-        " as well as ",
-    )
-    padded = f" {text} "
-    return any(marker in padded for marker in markers)
-
-
+def _select_supported_evidence_items(
+    *,
+    evidence_items: list[ComplianceEvidenceItem],
+    supported_evidence: list[str],
+    fallback_source_document: str,
+) -> list[ComplianceEvidenceItem]:
+    evidence_by_key = {
+        _normalize_evidence_item_key(item.text): item
+        for item in evidence_items
+        if normalize_whitespace(item.text)
+    }
+    selected: list[ComplianceEvidenceItem] = []
+    for evidence in supported_evidence:
+        key = _normalize_evidence_item_key(evidence)
+        if not key:
+            continue
+        existing = evidence_by_key.get(key)
+        if existing is not None:
+            selected.append(
+                existing.model_copy(
+                    update={
+                        "source_document": fallback_source_document or existing.source_document,
+                    }
+                )
+            )
+            continue
+        selected.append(
+            ComplianceEvidenceItem(
+                text=evidence,
+                source_document=fallback_source_document,
+            )
+        )
+    return selected
 def flatten_record_sections(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     flattened: list[dict[str, Any]] = []
     for record in records:

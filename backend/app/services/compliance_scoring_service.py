@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 
 from app.schemas.compliance import (
@@ -7,6 +8,23 @@ from app.schemas.compliance import (
     ComplianceFinding,
 )
 
+VALID_STATUSES = {"satisfied", "partial", "not_satisfied"}
+log = logging.getLogger(__name__)
+
+
+def _normalize_status(status: object) -> str:
+    # IMPORTANT:
+    # Status must come ONLY from LLM output.
+    # Evidence presence must NOT upgrade status.
+    normalized = str(status or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized not in VALID_STATUSES:
+        log.warning("Invalid status '%s', defaulting to partial", status)
+        return "partial"
+    return normalized
+
+
+# Legacy compliance metrics (UI tables only)
+# Deprecated: do not use for evaluation.
  # DEPRECATED: legacy scoring, not used in evaluation_v3
 def enrich_analysis_for_scoring(
     analysis: ComplianceAnalysis,
@@ -39,14 +57,9 @@ def _enrich_finding(
     effective_weight = weight if weight is not None else _compute_weight(finding.requirement)
     expected_evidence_breadth = _coerce_expected_evidence_breadth(deliverable_meta)
     material_element_count = _estimate_material_element_count(finding.requirement)
-    adjusted_status = _apply_structural_breadth_threshold(
-        status=finding.status,
-        evidence_breadth=finding.evidence_breadth,
-        expected_evidence_breadth=expected_evidence_breadth,
-    )
     normalized_finding = finding.model_copy(
         update={
-            "status": adjusted_status,
+            "status": _normalize_status(finding.status),
             "expected_evidence_breadth": expected_evidence_breadth,
         }
     )
@@ -58,12 +71,8 @@ def _enrich_finding(
         finding=normalized_finding,
         material_element_count=material_element_count,
     )
-    final_status = _derive_status_from_requirement_coverage_percent(
-        requirement_coverage_percent=requirement_coverage_percent,
-    )
     return normalized_finding.model_copy(
         update={
-            "status": final_status,
             "evidence_strength": evidence_strength,
             "weight": effective_weight,
             "material_element_count": material_element_count,
@@ -80,22 +89,7 @@ def _coerce_expected_evidence_breadth(deliverable_meta: dict[str, object] | None
         return int(raw)
     return 1
 
- # DEPRECATED: legacy scoring, not used in evaluation_v3
-def _apply_structural_breadth_threshold(
-    *,
-    status: str,
-    evidence_breadth: int,
-    expected_evidence_breadth: int,
-) -> str:
-    if status != "satisfied":
-        return status
-    if evidence_breadth <= 0:
-        return status
-    if expected_evidence_breadth <= 1:
-        return status
-    return status if evidence_breadth >= expected_evidence_breadth else "partial"
-
- # DEPRECATED: legacy scoring, not used in evaluation_v3
+# DEPRECATED: legacy scoring, not used in evaluation_v3
 def _compute_evidence_strength(
     finding: ComplianceFinding,
     *,
@@ -176,18 +170,7 @@ def _compute_requirement_coverage_percent(
     )
     return round(100 * min(element_ratio, breadth_ratio))
 
- # DEPRECATED: legacy scoring, not used in evaluation_v3
-def _derive_status_from_requirement_coverage_percent(
-    *,
-    requirement_coverage_percent: int,
-) -> str:
-    if requirement_coverage_percent >= 80:
-        return "satisfied"
-    if requirement_coverage_percent >= 20:
-        return "partial"
-    return "not_satisfied"
-
- # DEPRECATED: legacy scoring, not used in evaluation_v3
+# DEPRECATED: legacy scoring, not used in evaluation_v3
 def _count_supportive_grounded_evidence(finding: ComplianceFinding) -> int:
     return sum(
         1

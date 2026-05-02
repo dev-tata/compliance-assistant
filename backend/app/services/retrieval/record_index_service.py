@@ -74,11 +74,28 @@ def search_prepared_record_indexes(
         key=lambda item: float(item.get("faiss_score") or 0.0),
         reverse=True,
     )
-    return rerank_results(
+    reranked_results = rerank_results(
         query_text=query_text,
         candidates=results[: max(top_k, 1)],
         final_top_k=final_top_k,
     )
+    print(
+        {
+            "stage": "record_index_service.search_prepared_record_indexes",
+            "returned": "reranked_results",
+            "count": len(reranked_results),
+            "sample": [
+                {
+                    "faiss_score": item.get("faiss_score"),
+                    "reranker_score": item.get("reranker_score"),
+                    "raw_retrieval_score": item.get("raw_retrieval_score"),
+                    "retrieval_score": item.get("retrieval_score"),
+                }
+                for item in reranked_results[:3]
+            ],
+        }
+    )
+    return reranked_results
 
 
 def remove_record_index(document_payload: dict[str, Any]) -> None:
