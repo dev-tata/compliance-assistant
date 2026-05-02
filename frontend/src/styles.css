@@ -856,6 +856,35 @@ textarea {
   gap: 4px;
 }
 
+.table-evidence-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.table-evidence-list li {
+  line-height: 1.35;
+}
+
+.table-empty {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.table-note {
+  color: var(--accent);
+  font-size: var(--fs-sm);
+}
+
+.table-conflict-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--fs-sm);
+}
+
 .preview {
   margin: 0;
   max-height: 360px;

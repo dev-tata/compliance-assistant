@@ -36,9 +36,14 @@ env/
 backend/storage/
 
 # Evaluation folder (not shared, contains large files)
-backend/evaluation/
-backend/evaluation_setup/
-backend/evaluation_v3/
+backend/evaluation_v3/cache/
+backend/evaluation_v3/manual_comparisons/
+backend/evaluation_v3/output/
+backend/evaluation_v3/runs/
+backend/evaluation_v3/__pycache__/
+backend/evaluation_v3/__init__.py
+backend/evaluation_v3/README.md
+backend/evaluation_runs/
 backend/tests/
 
 # Frontend / Node

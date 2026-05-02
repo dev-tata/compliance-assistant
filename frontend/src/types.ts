@@ -184,7 +184,8 @@ export type EvaluationV3ContradictionType =
   | "direct_conflict"
   | "wrong_entity"
   | "temporal_conflict"
-  | "reference_conflict";
+  | "reference_conflict"
+  | "reference_clarification";
 
 export type EvaluationV3ResultRow = {
   deliverable_id: string;
@@ -192,6 +193,7 @@ export type EvaluationV3ResultRow = {
   evidence_status: EvaluationV3EvidenceStatus;
   grounded_evidence_count: number;
   required_evidence_count: number;
+  grounded_chunk_count?: number;
   subsection_coverage_ratio: number;
   has_conflict: boolean;
   contradiction_type: EvaluationV3ContradictionType;

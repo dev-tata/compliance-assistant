@@ -77,36 +77,6 @@ function formatFindingStatusLine(
   return escapeHtml(finding.status);
 }
 
-function renderLinkedRows(
-  rows: ComplianceResponse["analysis"]["linked_rows"],
-  procedureToRecord: ComplianceResponse["analysis"]["procedure_to_record"] | ComplianceResponse["analysis"]["findings"],
-): string {
-  if (rows.length === 0) {
-    return `
-      <tr>
-        <td>None</td>
-        <td>None</td>
-      </tr>
-    `;
-  }
-
-  return rows.map((row, index) => {
-    const finding = procedureToRecord?.[index];
-    return `
-    <tr>
-      <td>${index + 1}</td>
-      <td>
-        <div>${escapeHtml(row.requirement) || "&mdash;"}</div>
-        ${row.rationale ? `<div class="row-rationale">${escapeHtml(row.rationale)}</div>` : ""}
-      </td>
-      <td>
-        <div>${finding ? formatFindingStatusLine(finding) : (escapeHtml(row.status) || "&mdash;")}</div>
-      </td>
-    </tr>
-  `;
-  }).join("");
-}
-
 function getAnalysisFindings(
   analysis: ComplianceResponse["analysis"] | NonNullable<ComplianceResponse["stages"]>[number]["analysis"] | null | undefined,
 ) {
@@ -190,11 +160,9 @@ function applyFrozenDeliverableConfidence(
 }
 
 function renderAssessmentBar({
-  analysis,
   retrievalMetrics,
   statusSummary,
 }: {
-  analysis: ComplianceResponse["analysis"];
   retrievalMetrics?: ComplianceResponse["retrieval_metrics"] | ComplianceResponse["baseline_retrieval_metrics"] | null;
   statusSummary: Record<"satisfied" | "partial" | "not_satisfied", number>;
 }): string {
@@ -244,36 +212,64 @@ function renderEvidenceList(
   `).join("");
 }
 
-function renderRequirementEvaluations(
+function getFindingEvidenceItems(
+  finding: ComplianceResponse["analysis"]["findings"][number],
+) {
+  return finding.evidence_items?.length
+    ? finding.evidence_items
+    : finding.evidence.map((text) => ({
+        text,
+        source_document: finding.source_document,
+        stage_label: null,
+      }));
+}
+
+function formatStageLabel(stageKey: string, fallbackLabel: string): string {
+  const labelMap: Record<string, string> = {
+    stage_1_non_rag: "Stage 1 - Non-RAG",
+    stage_2_record_retrieval: "Stage 2 - Record Retrieval",
+    stage_3_reference_retrieval: "Stage 3 - Reference Retrieval",
+  };
+  return labelMap[stageKey] ?? fallbackLabel;
+}
+
+function renderStageTable(
   analysis: ComplianceResponse["analysis"] | NonNullable<ComplianceResponse["stages"]>[number]["analysis"],
-  retrievalMetrics?: ComplianceResponse["retrieval_metrics"] | ComplianceResponse["baseline_retrieval_metrics"] | null,
+  retrievalMetrics: ComplianceResponse["retrieval_metrics"] | ComplianceResponse["baseline_retrieval_metrics"] | null | undefined,
+  stageKey: string,
 ): string {
   const findings = getAnalysisFindings(analysis);
+  if (!findings.length) {
+    return `
+      <tr>
+        <td colspan="${stageKey === "stage_2_record_retrieval" ? 7 : 6}">No requirement evaluations found.</td>
+      </tr>
+    `;
+  }
   return findings.map((finding, index) => {
     const rowRecall = analysis.linked_rows?.[index]?.record_recall_at_k;
-    const recallLabel = typeof rowRecall === "number" && retrievalMetrics?.record_k
-      ? `Recall@${retrievalMetrics.record_k}: ${rowRecall.toFixed(1)} / 1.0`
-      : "";
+    const evidenceItems = getFindingEvidenceItems(finding);
+    const rationale = analysis.linked_rows?.[index]?.rationale ?? "";
     return `
-      <article class="finding requirement-evaluation">
-        <header>
-          <div class="finding-title">
-            <div class="requirement-label">Requirement ${index + 1}</div>
-            <strong>${escapeHtml(finding.requirement)}</strong>
-          </div>
-          <div class="finding-header-meta">
-            <div class="finding-status-stack">
-              <span class="status status-${escapeHtml(finding.status)}">${formatFindingStatusLine(finding)}</span>
-            </div>
-            ${recallLabel ? `<span class="finding-recall">${escapeHtml(recallLabel)}</span>` : ""}
-          </div>
-        </header>
-        <div class="finding-metrics">
-          <span><strong>Source:</strong> ${escapeHtml(finding.source_document || "none")}</span>
-          <span><strong>Weight:</strong> ${finding.weight.toFixed(1)}</span>
-        </div>
-        <ul>${renderEvidenceList(finding)}</ul>
-      </article>
+      <tr>
+        <td>${escapeHtml(`REQ-${index + 1}`)}</td>
+        <td>${escapeHtml(finding.requirement)}</td>
+        <td><span class="status status-${escapeHtml(finding.status)}">${formatFindingStatusLine(finding)}</span></td>
+        <td>${evidenceItems.length}</td>
+        <td>
+          ${evidenceItems.length
+            ? `<ul class="table-evidence-list">${renderEvidenceList(finding)}</ul>`
+            : '<span class="table-empty">None</span>'}
+        </td>
+        <td>${rationale ? escapeHtml(rationale) : '<span class="table-empty">None</span>'}</td>
+        ${stageKey === "stage_2_record_retrieval"
+          ? `<td>${
+            typeof rowRecall === "number" && retrievalMetrics?.record_k
+              ? escapeHtml(`Recall@${retrievalMetrics.record_k}: ${formatRecallMetric(rowRecall)}`)
+              : '<span class="table-empty">N/A</span>'
+          }</td>`
+          : ""}
+      </tr>
     `;
   }).join("");
 }
@@ -289,39 +285,50 @@ function renderStagePanel(
 ): string {
   const stageFindings = getAnalysisFindings(stage.analysis);
   const stageStatusSummary = summarizeStatuses(stageFindings);
+  const stageTitle = formatStageLabel(stage.stage_key, stage.stage_label);
   return `
     <section class="stage-panel">
-      <h2 class="stage-panel-title">${escapeHtml(stage.stage_label)}</h2>
+      <h2 class="stage-panel-title">${escapeHtml(stageTitle)}</h2>
       ${renderAssessmentBar({
-        analysis: stage.analysis,
         retrievalMetrics: stage.retrieval_metrics,
         statusSummary: stageStatusSummary,
       })}
       <details class="stage-panel-details">
-        <summary>Requirement details</summary>
+        <summary>Requirement table</summary>
         <div class="stage-panel-body">
           <div class="gap-table-wrap">
             <table class="gap-table">
               <thead>
                 <tr>
-                  <th>#</th>
-                  <th>Requirement</th>
-                  <th>Status</th>
+                  <th>Requirement ID</th>
+                  <th>Requirement text</th>
+                  <th>Stage status</th>
+                  <th>Evidence quote count</th>
+                  <th>Evidence quotes</th>
+                  <th>Rationale</th>
+                  ${stage.stage_key === "stage_2_record_retrieval" ? "<th>Record recall@k</th>" : ""}
                 </tr>
               </thead>
-              <tbody>${renderLinkedRows(
-                stage.analysis.linked_rows ?? [],
-                stageFindings,
-              )}</tbody>
+              <tbody>${renderStageTable(stage.analysis, stage.retrieval_metrics, stage.stage_key)}</tbody>
             </table>
           </div>
-          <section class="section-block">
-            <h3>Grounded Evidence (Procedure → Record)</h3>
-            <div class="findings">${renderRequirementEvaluations(stage.analysis, stage.retrieval_metrics)}</div>
-          </section>
         </div>
       </details>
     </section>
+  `;
+}
+
+function renderEvaluationV3ContradictionCell(row: EvaluationV3Result["units"][number]): string {
+  if (row.contradiction_type === "reference_clarification" && !row.has_conflict) {
+    return `<span class="table-note">Reference role: clarification</span>`;
+  }
+  if (!row.has_conflict || row.contradiction_type === "none") {
+    return '<span class="table-empty">None</span>';
+  }
+  return `
+    <div class="table-conflict-block">
+      <div><strong>Contradiction:</strong> ${escapeHtml(row.contradiction_type)}</div>
+    </div>
   `;
 }
 
@@ -336,9 +343,10 @@ function renderEvaluationV3Panel(evaluationV3: EvaluationV3Result): string {
         <td>${escapeHtml(row.evidence_status)}</td>
         <td>${row.grounded_evidence_count}</td>
         <td>${row.required_evidence_count}</td>
+        <td>${row.grounded_chunk_count ?? 0}</td>
         <td>${formatRatio(row.subsection_coverage_ratio)}</td>
         <td>${row.has_conflict ? "Yes" : "No"}</td>
-        <td>${escapeHtml(row.contradiction_type)}</td>
+        <td>${renderEvaluationV3ContradictionCell(row)}</td>
       </tr>
     `).join("")
     : `
@@ -370,7 +378,7 @@ function renderEvaluationV3Panel(evaluationV3: EvaluationV3Result): string {
         <span class="assessment-item">Avg Coverage <strong>${formatRatio(metrics.avg_subsection_coverage_ratio)}</strong></span>
       </div>
       <details class="stage-panel-details" open>
-        <summary>Evidence-based deliverables</summary>
+        <summary>Evidence-based scoring table</summary>
         <div class="stage-panel-body">
           <div class="gap-table-wrap">
             <table class="gap-table">
@@ -379,11 +387,12 @@ function renderEvaluationV3Panel(evaluationV3: EvaluationV3Result): string {
                   <th>Deliverable</th>
                   <th>Final Label</th>
                   <th>Evidence Status</th>
-                  <th>Grounded</th>
-                  <th>Required</th>
-                  <th>Coverage</th>
+                  <th>Grounded quotes</th>
+                  <th>Required quotes</th>
+                  <th>Grounded chunks</th>
+                  <th>Diagnostic coverage</th>
                   <th>Conflict</th>
-                  <th>Contradiction</th>
+                  <th>Conflict detail</th>
                 </tr>
               </thead>
               <tbody>${rowsHtml}</tbody>
