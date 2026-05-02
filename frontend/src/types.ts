@@ -190,11 +190,23 @@ export type EvaluationV3ContradictionType =
 export type EvaluationV3ResultRow = {
   deliverable_id: string;
   final_label?: EvaluationV3Label | null;
+  stage_1_label?: EvaluationV3Label | null;
+  stage_2_label?: EvaluationV3Label | null;
+  stage_3_label?: EvaluationV3Label | null;
+  stage_1_evidence_status: EvaluationV3EvidenceStatus;
+  stage_2_evidence_status: EvaluationV3EvidenceStatus;
+  stage_3_evidence_status: EvaluationV3EvidenceStatus;
+  stage_1_grounded_evidence_count: number;
+  stage_2_grounded_evidence_count: number;
+  stage_3_grounded_evidence_count: number;
+  stage_1_evidence_coverage_ratio: number;
+  stage_2_evidence_coverage_ratio: number;
+  stage_3_evidence_coverage_ratio: number;
   evidence_status: EvaluationV3EvidenceStatus;
   grounded_evidence_count: number;
   required_evidence_count: number;
   grounded_chunk_count?: number;
-  subsection_coverage_ratio: number;
+  evidence_coverage_ratio: number;
   has_conflict: boolean;
   contradiction_type: EvaluationV3ContradictionType;
 };
@@ -207,7 +219,7 @@ export type EvaluationV3Metrics = {
   missing_count: number;
   conflicting_count: number;
   avg_grounded_evidence_count: number;
-  avg_subsection_coverage_ratio: number;
+  avg_evidence_coverage_ratio: number;
 };
 
 export type EvaluationV3Result = {

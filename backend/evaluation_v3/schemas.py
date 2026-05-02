@@ -44,7 +44,7 @@ EVALUATION_V3_ANALYSIS_METRICS: Final[tuple[str, ...]] = (
     "missing_count",
     "conflicting_count",
     "avg_grounded_evidence_count",
-    "avg_subsection_coverage_ratio",
+    "avg_evidence_coverage_ratio",
 )
 
 
@@ -234,7 +234,7 @@ class EvaluationV3Metrics(BaseModel):
     missing_count: int = Field(default=0, ge=0)
     conflicting_count: int = Field(default=0, ge=0)
     avg_grounded_evidence_count: float = Field(default=0.0, ge=0.0)
-    avg_subsection_coverage_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    avg_evidence_coverage_ratio: float = Field(default=0.0, ge=0.0)
 
 
 class EvaluationV3ResultRow(BaseModel):
@@ -242,11 +242,23 @@ class EvaluationV3ResultRow(BaseModel):
 
     deliverable_id: str
     final_label: ComplianceLabel | None = None
+    stage_1_label: ComplianceLabel | None = None
+    stage_2_label: ComplianceLabel | None = None
+    stage_3_label: ComplianceLabel | None = None
+    stage_1_evidence_status: EvidenceStatus = "missing"
+    stage_2_evidence_status: EvidenceStatus = "missing"
+    stage_3_evidence_status: EvidenceStatus = "missing"
+    stage_1_grounded_evidence_count: int = Field(default=0, ge=0)
+    stage_2_grounded_evidence_count: int = Field(default=0, ge=0)
+    stage_3_grounded_evidence_count: int = Field(default=0, ge=0)
+    stage_1_evidence_coverage_ratio: float = Field(default=0.0, ge=0.0)
+    stage_2_evidence_coverage_ratio: float = Field(default=0.0, ge=0.0)
+    stage_3_evidence_coverage_ratio: float = Field(default=0.0, ge=0.0)
     evidence_status: EvidenceStatus
     grounded_evidence_count: int = Field(default=0, ge=0)
     grounded_chunk_count: int = Field(default=0, ge=0)
     required_evidence_count: int = Field(default=1, ge=0)
-    subsection_coverage_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    evidence_coverage_ratio: float = Field(default=0.0, ge=0.0)
     has_conflict: bool = False
     contradiction_type: ContradictionType = "none"
 

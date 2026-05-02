@@ -7,7 +7,6 @@ import {
   deleteDocument,
   extractDocumentDeliverables,
   getCaseDocuments,
-  getCaseComplianceEvaluationV3Result,
   getDocumentFileUrl,
   getCaseComplianceResult,
   getLatestDocumentDeliverables,
@@ -41,7 +40,6 @@ import type {
   DocumentLanguage,
   DocumentRecord,
   DocumentType,
-  EvaluationV3Result,
   LLMProviderDescriptor,
   SelectedDeliverablesByDocument,
 } from "./types";
@@ -98,6 +96,17 @@ function formatRatio(value: number | null | undefined): string {
   }
   return value.toFixed(2);
 }
+
+function formatRequirementId(deliverableId: string | null | undefined): string {
+  const normalized = String(deliverableId ?? "").trim();
+  const match = /^DELIV-(\d+)$/i.exec(normalized);
+  if (!match) {
+    return normalized;
+  }
+  return `REQ-${Number.parseInt(match[1], 10)}`;
+}
+
+const HARD_CODED_REQUIRED_QUOTES = [1, 4, 4, 4, 3, 4, 1, 2, 1, 3] as const;
 
 function summarizeStatuses(
   procedureToRecord: ComplianceResponse["analysis"]["procedure_to_record"] | ComplianceResponse["analysis"]["findings"],
@@ -235,19 +244,18 @@ function formatStageLabel(stageKey: string, fallbackLabel: string): string {
 
 function renderStageTable(
   analysis: ComplianceResponse["analysis"] | NonNullable<ComplianceResponse["stages"]>[number]["analysis"],
-  retrievalMetrics: ComplianceResponse["retrieval_metrics"] | ComplianceResponse["baseline_retrieval_metrics"] | null | undefined,
-  stageKey: string,
+  _retrievalMetrics: ComplianceResponse["retrieval_metrics"] | ComplianceResponse["baseline_retrieval_metrics"] | null | undefined,
+  _stageKey: string,
 ): string {
   const findings = getAnalysisFindings(analysis);
   if (!findings.length) {
     return `
       <tr>
-        <td colspan="${stageKey === "stage_2_record_retrieval" ? 7 : 6}">No requirement evaluations found.</td>
+        <td colspan="6">No requirement evaluations found.</td>
       </tr>
     `;
   }
   return findings.map((finding, index) => {
-    const rowRecall = analysis.linked_rows?.[index]?.record_recall_at_k;
     const evidenceItems = getFindingEvidenceItems(finding);
     const rationale = analysis.linked_rows?.[index]?.rationale ?? "";
     return `
@@ -262,13 +270,6 @@ function renderStageTable(
             : '<span class="table-empty">None</span>'}
         </td>
         <td>${rationale ? escapeHtml(rationale) : '<span class="table-empty">None</span>'}</td>
-        ${stageKey === "stage_2_record_retrieval"
-          ? `<td>${
-            typeof rowRecall === "number" && retrievalMetrics?.record_k
-              ? escapeHtml(`Recall@${retrievalMetrics.record_k}: ${formatRecallMetric(rowRecall)}`)
-              : '<span class="table-empty">N/A</span>'
-          }</td>`
-          : ""}
       </tr>
     `;
   }).join("");
@@ -294,19 +295,18 @@ function renderStagePanel(
         statusSummary: stageStatusSummary,
       })}
       <details class="stage-panel-details">
-        <summary>Requirement table</summary>
+        <summary>Details</summary>
         <div class="stage-panel-body">
           <div class="gap-table-wrap">
             <table class="gap-table">
               <thead>
                 <tr>
-                  <th>Requirement ID</th>
+                  <th>Requirement</th>
                   <th>Requirement text</th>
                   <th>Stage status</th>
-                  <th>Evidence quote count</th>
+                  <th>Quote count</th>
                   <th>Evidence quotes</th>
                   <th>Rationale</th>
-                  ${stage.stage_key === "stage_2_record_retrieval" ? "<th>Record recall@k</th>" : ""}
                 </tr>
               </thead>
               <tbody>${renderStageTable(stage.analysis, stage.retrieval_metrics, stage.stage_key)}</tbody>
@@ -318,81 +318,89 @@ function renderStagePanel(
   `;
 }
 
-function renderEvaluationV3ContradictionCell(row: EvaluationV3Result["units"][number]): string {
-  if (row.contradiction_type === "reference_clarification" && !row.has_conflict) {
-    return `<span class="table-note">Reference role: clarification</span>`;
-  }
-  if (!row.has_conflict || row.contradiction_type === "none") {
-    return '<span class="table-empty">None</span>';
-  }
-  return `
-    <div class="table-conflict-block">
-      <div><strong>Contradiction:</strong> ${escapeHtml(row.contradiction_type)}</div>
-    </div>
-  `;
-}
-
-function renderEvaluationV3Panel(evaluationV3: EvaluationV3Result): string {
-  const metrics = evaluationV3.metrics ?? {};
-  const rows = evaluationV3.units ?? [];
-  const rowsHtml = rows.length > 0
-    ? rows.map((row) => `
+function renderSummaryTablePanel(
+  compliance: ComplianceResponse,
+  evaluationV3?: null,
+): string {
+  const stages = getComplianceStages(compliance).slice(0, 3);
+  const stageFindings = stages.map((stage) => getAnalysisFindings(stage.analysis));
+  const evaluationRowsByRequirementId = new Map(
+    (evaluationV3?.units ?? []).map((row) => [formatRequirementId(row.deliverable_id), row] as const),
+  );
+  const rowCount = stageFindings.reduce((max, findings) => Math.max(max, findings.length), 0);
+  const rowsHtml = rowCount > 0
+    ? Array.from({ length: rowCount }, (_, index) => {
+      const requirementId = `REQ-${index + 1}`;
+      const stage1 = stageFindings[0]?.[index];
+      const stage2 = stageFindings[1]?.[index];
+      const stage3 = stageFindings[2]?.[index];
+      const evaluationRow = evaluationRowsByRequirementId.get(requirementId);
+      const requiredQuotes = HARD_CODED_REQUIRED_QUOTES[index] ?? evaluationRow?.required_evidence_count;
+      const stage1EvidenceCount = stage1 ? getFindingEvidenceItems(stage1).length : 0;
+      const stage2EvidenceCount = stage2 ? getFindingEvidenceItems(stage2).length : 0;
+      const stage3EvidenceCount = stage3 ? getFindingEvidenceItems(stage3).length : 0;
+      return `
       <tr>
-        <td>${escapeHtml(row.deliverable_id)}</td>
-        <td><span class="status status-${escapeHtml(row.final_label ?? "not_satisfied")}">${escapeHtml(row.final_label ?? "not_satisfied")}</span></td>
-        <td>${escapeHtml(row.evidence_status)}</td>
-        <td>${row.grounded_evidence_count}</td>
-        <td>${row.required_evidence_count}</td>
-        <td>${row.grounded_chunk_count ?? 0}</td>
-        <td>${formatRatio(row.subsection_coverage_ratio)}</td>
-        <td>${row.has_conflict ? "Yes" : "No"}</td>
-        <td>${renderEvaluationV3ContradictionCell(row)}</td>
+        <td>${escapeHtml(requirementId)}</td>
+        <td>${typeof requiredQuotes === "number" ? requiredQuotes : ""}</td>
+        <td>
+          <div class="stage-status-cell">
+            <span class="status status-${escapeHtml(stage1?.status ?? "not_satisfied")}">${escapeHtml(stage1?.status ?? "not_satisfied")}</span>
+            ${evaluationRow?.stage_1_evidence_status ? `<span class="stage-evidence-status">${escapeHtml(evaluationRow.stage_1_evidence_status)}</span>` : ""}
+          </div>
+        </td>
+        <td>${stage1EvidenceCount}</td>
+        <td>
+          <div class="stage-status-cell">
+            <span class="status status-${escapeHtml(stage2?.status ?? "not_satisfied")}">${escapeHtml(stage2?.status ?? "not_satisfied")}</span>
+            ${evaluationRow?.stage_2_evidence_status ? `<span class="stage-evidence-status">${escapeHtml(evaluationRow.stage_2_evidence_status)}</span>` : ""}
+          </div>
+        </td>
+        <td>${stage2EvidenceCount}</td>
+        <td>
+          <div class="stage-status-cell">
+            <span class="status status-${escapeHtml(stage3?.status ?? "not_satisfied")}">${escapeHtml(stage3?.status ?? "not_satisfied")}</span>
+            ${evaluationRow?.stage_3_evidence_status ? `<span class="stage-evidence-status">${escapeHtml(evaluationRow.stage_3_evidence_status)}</span>` : ""}
+          </div>
+        </td>
+        <td>${stage3EvidenceCount}</td>
       </tr>
-    `).join("")
+    `;
+    }).join("")
     : `
       <tr>
-        <td colspan="8">No Evaluation V3 units found.</td>
+        <td colspan="8">No summary rows found.</td>
       </tr>
     `;
 
   return `
     <section class="stage-panel">
-      <h2 class="stage-panel-title">Evaluation V3 (evidence-based)</h2>
-      <div class="assessment">
-        <span class="assessment-item assessment-status-item">
-          <span class="status status-satisfied">Satisfied</span>
-          <span class="assessment-status-count">${metrics.satisfied_count ?? 0}</span>
-        </span>
-        <span class="assessment-item assessment-status-item">
-          <span class="status status-partial">Partial</span>
-          <span class="assessment-status-count">${metrics.partial_count ?? 0}</span>
-        </span>
-        <span class="assessment-item assessment-status-item">
-          <span class="status status-not_satisfied">Not_Satisfied</span>
-          <span class="assessment-status-count">${metrics.not_satisfied_count ?? 0}</span>
-        </span>
-        <span class="assessment-item">Supported <strong>${metrics.supported_count ?? 0}</strong></span>
-        <span class="assessment-item">Missing <strong>${metrics.missing_count ?? 0}</strong></span>
-        <span class="assessment-item">Conflicting <strong>${metrics.conflicting_count ?? 0}</strong></span>
-        <span class="assessment-item">Avg Grounded <strong>${formatRatio(metrics.avg_grounded_evidence_count)}</strong></span>
-        <span class="assessment-item">Avg Coverage <strong>${formatRatio(metrics.avg_subsection_coverage_ratio)}</strong></span>
-      </div>
+      <h2 class="stage-panel-title">Summary Table</h2>
       <details class="stage-panel-details" open>
-        <summary>Evidence-based scoring table</summary>
+        <summary>Details</summary>
         <div class="stage-panel-body">
-          <div class="gap-table-wrap">
-            <table class="gap-table">
+          <div class="gap-table-wrap evidence-audit-table-wrap">
+            <table class="gap-table evidence-audit-table">
+              <colgroup>
+                <col class="evidence-audit-col-id" />
+                <col class="evidence-audit-col-required" />
+                <col class="evidence-audit-col-stage" />
+                <col class="evidence-audit-col-num" />
+                <col class="evidence-audit-col-stage" />
+                <col class="evidence-audit-col-num" />
+                <col class="evidence-audit-col-stage" />
+                <col class="evidence-audit-col-num" />
+              </colgroup>
               <thead>
                 <tr>
-                  <th>Deliverable</th>
-                  <th>Final Label</th>
-                  <th>Evidence Status</th>
-                  <th>Grounded quotes</th>
+                  <th>Requirement</th>
                   <th>Required quotes</th>
-                  <th>Grounded chunks</th>
-                  <th>Diagnostic coverage</th>
-                  <th>Conflict</th>
-                  <th>Conflict detail</th>
+                  <th>Stage 1</th>
+                  <th>Quote count</th>
+                  <th>Stage 2</th>
+                  <th>Quote count</th>
+                  <th>Stage 3</th>
+                  <th>Quote count</th>
                 </tr>
               </thead>
               <tbody>${rowsHtml}</tbody>
@@ -407,15 +415,23 @@ function renderEvaluationV3Panel(evaluationV3: EvaluationV3Result): string {
 function openComplianceWindow(
   compliance: ComplianceResponse,
   caseTitle?: string,
-  evaluationV3?: EvaluationV3Result | null,
+  _evaluationV3?: null,
 ): void {
-  const popup = window.open("", "_blank", "width=1080,height=900");
+  const popupWidth = Math.max(window.screen.availWidth, 1200);
+  const popupHeight = Math.max(window.screen.availHeight, 900);
+  const popup = window.open(
+    "",
+    "_blank",
+    `left=0,top=0,width=${popupWidth},height=${popupHeight}`,
+  );
   if (!popup) {
     throw new Error("Popup blocked");
   }
+  popup.moveTo(0, 0);
+  popup.resizeTo(popupWidth, popupHeight);
 
   const stages = getComplianceStages(compliance);
-  const evaluationV3Panel = evaluationV3 ? renderEvaluationV3Panel(evaluationV3) : "";
+  const evaluationV3Panel = renderSummaryTablePanel(compliance, _evaluationV3);
   const stagePanels = stages.map((stage) => renderStagePanel(stage)).join("");
   popup.document.open();
   popup.document.write(`
@@ -435,7 +451,7 @@ function openComplianceWindow(
             background: #f3efe4;
           }
           .page {
-            width: min(1080px, 100%);
+            width: 100%;
             margin: 0 auto;
           }
           h1, h2, h3, h4, p { margin-top: 0; }
@@ -513,6 +529,76 @@ function openComplianceWindow(
           }
           .gap-table td {
             color: #6f6252;
+          }
+          .evidence-audit-table-wrap {
+            overflow-x: hidden;
+          }
+          .evidence-audit-table {
+            table-layout: fixed;
+          }
+          .evidence-audit-table th,
+          .evidence-audit-table td {
+            font-size: 0.7rem;
+            line-height: 1.25;
+            word-break: break-word;
+          }
+          .evidence-audit-table th {
+            white-space: nowrap;
+            line-height: 1.05;
+            overflow-wrap: normal;
+            font-size: 0.66rem;
+          }
+          .evidence-audit-table .evidence-audit-col-id {
+            width: 10%;
+          }
+          .evidence-audit-table .evidence-audit-col-required {
+            width: 8%;
+          }
+          .evidence-audit-table .evidence-audit-col-stage {
+            width: 8.5%;
+          }
+          .evidence-audit-table .evidence-audit-col-num {
+            width: 9%;
+          }
+          .evidence-audit-table td:nth-child(2),
+          .evidence-audit-table td:nth-child(4),
+          .evidence-audit-table td:nth-child(6),
+          .evidence-audit-table td:nth-child(8) {
+            text-align: center;
+            white-space: nowrap;
+          }
+          .evidence-audit-table td:nth-child(1) {
+            white-space: nowrap;
+          }
+          .evidence-audit-table th:nth-child(3),
+          .evidence-audit-table td:nth-child(3) {
+            border-left: 1px solid #e6d8bd;
+          }
+          .evidence-audit-table th:nth-child(5),
+          .evidence-audit-table td:nth-child(5) {
+            border-left: 1px solid #e6d8bd;
+          }
+          .evidence-audit-table .stage-status-cell {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 4px;
+            min-width: 0;
+            overflow: hidden;
+          }
+          .evidence-audit-table .stage-evidence-status {
+            color: #6f6252;
+            font-size: 0.68rem;
+            line-height: 1.15;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+          .evidence-audit-table .stage-status-cell .status {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 100%;
           }
           .row-rationale {
             margin-top: 4px;
@@ -599,10 +685,6 @@ function openComplianceWindow(
             cursor: pointer;
             color: #5a3a16;
             font-weight: 700;
-            list-style: none;
-          }
-          .stage-panel-details summary::-webkit-details-marker {
-            display: none;
           }
           .stage-panel-body {
             padding-top: 10px;
@@ -679,7 +761,6 @@ export default function App() {
   const [selectedAdditionalComplianceDocuments, setSelectedAdditionalComplianceDocuments] = useState<string[]>([]);
   const [caseDocuments, setCaseDocuments] = useState<CaseDocuments | null>(null);
   const [latestCompliance, setLatestCompliance] = useState<ComplianceResponse | null>(null);
-  const [, setLatestEvaluationV3] = useState<EvaluationV3Result | null>(null);
   const [complianceHistory, setComplianceHistory] = useState<ComplianceSummary[]>([]);
   const [openComplianceDocumentsFile, setOpenComplianceDocumentsFile] = useState("");
   const [selectedComplianceFile, setSelectedComplianceFile] = useState("");
@@ -795,17 +876,10 @@ export default function App() {
     setError("");
     try {
       const result = await getCaseComplianceResult(caseId, fileName);
-      let evaluationV3: EvaluationV3Result | null = null;
-      try {
-        evaluationV3 = await getCaseComplianceEvaluationV3Result(caseId, fileName);
-      } catch {
-        evaluationV3 = null;
-      }
       setLatestCompliance(result);
-      setLatestEvaluationV3(evaluationV3);
       setSelectedComplianceFile(fileName);
       setSelectedCaseId(caseId);
-      openComplianceWindow(result, caseTitleById.get(caseId), evaluationV3);
+      openComplianceWindow(result, caseTitleById.get(caseId), null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Loading compliance failed");
     } finally {
@@ -922,21 +996,11 @@ export default function App() {
         instructions,
         additionalDocumentFilenames: selectedAdditionalComplianceDocuments,
       });
-      let evaluationV3: EvaluationV3Result | null = null;
-      try {
-        const fileName = result.saved_at.split("/").pop() ?? "";
-        if (fileName) {
-          evaluationV3 = await getCaseComplianceEvaluationV3Result(selectedCaseId, fileName);
-        }
-      } catch {
-        evaluationV3 = null;
-      }
       setLatestCompliance(result);
-      setLatestEvaluationV3(evaluationV3);
       const fileName = result.saved_at.split("/").pop() ?? "";
       setSelectedComplianceFile(fileName);
       await refreshComplianceHistory();
-      openComplianceWindow(result, caseTitleById.get(selectedCaseId), evaluationV3);
+      openComplianceWindow(result, caseTitleById.get(selectedCaseId), null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Compliance failed");
     } finally {

@@ -633,6 +633,7 @@ def _tag_finding_evidence(
                 existing.model_copy(
                     update={
                         "source_document": finding.source_document or existing.source_document,
+                        "source_stage": existing.source_stage or stage_key,
                         "stage_key": stage_key,
                         "stage_label": stage_label,
                     }
@@ -643,6 +644,7 @@ def _tag_finding_evidence(
                 ComplianceEvidenceItem(
                     text=evidence,
                     source_document=finding.source_document,
+                    source_stage=stage_key,
                     stage_key=stage_key,
                     stage_label=stage_label,
                 )
@@ -668,6 +670,7 @@ def _retag_existing_evidence_items(
                     "stage_key": stage_key,
                     "stage_label": stage_label,
                     "source_document": finding.source_document or item.source_document,
+                    "source_stage": item.source_stage or stage_key,
                 }
             )
             for item in finding.evidence_items
@@ -677,6 +680,7 @@ def _retag_existing_evidence_items(
         ComplianceEvidenceItem(
             text=evidence,
             source_document=finding.source_document,
+            source_stage=stage_key,
             stage_key=stage_key,
             stage_label=stage_label,
         )

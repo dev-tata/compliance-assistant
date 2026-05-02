@@ -1315,15 +1315,23 @@ def _resolve_linked_row_requirements(analysis: ComplianceAnalysis) -> list[Compl
         f"REQ-{index + 1}": finding.requirement
         for index, finding in enumerate(analysis.procedure_to_record)
     }
+    status_map = {
+        f"REQ-{index + 1}": finding.status
+        for index, finding in enumerate(analysis.procedure_to_record)
+    }
     resolved_rows: list[ComplianceLinkedRow] = []
     for row in analysis.linked_rows:
         requirement = row.requirement
         if not requirement and row.requirement_ref:
             requirement = requirement_map.get(row.requirement_ref, "")
+        status = row.status
+        if status is None and row.requirement_ref:
+            status = status_map.get(row.requirement_ref)
         resolved_rows.append(
             row.model_copy(
                 update={
                     "requirement": requirement,
+                    "status": status,
                 }
             )
         )

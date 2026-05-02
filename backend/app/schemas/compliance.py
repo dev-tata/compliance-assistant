@@ -79,7 +79,13 @@ class ComplianceFinding(BaseModel):
 
 class ComplianceEvidenceItem(BaseModel):
     text: str
+    evidence_id: str = ""
+    section_id: str = ""
+    subsection_id: str = ""
+    section_label: str = ""
+    heading_title: str = ""
     source_document: str = ""
+    source_stage: str | None = None
     stage_key: str | None = None
     stage_label: str | None = None
 
@@ -92,15 +98,22 @@ class ComplianceEvidenceItem(BaseModel):
             return data
         data = dict(data)
         data["text"] = str(data.get("text") or "").strip()
+        data["evidence_id"] = str(data.get("evidence_id") or "").strip()
+        data["section_id"] = str(data.get("section_id") or "").strip()
+        data["subsection_id"] = str(data.get("subsection_id") or "").strip()
+        data["section_label"] = str(data.get("section_label") or "").strip()
+        data["heading_title"] = str(data.get("heading_title") or "").strip()
         data["source_document"] = _normalize_source_document(
             data.get("source_document", data.get("source_documents"))
         )
+        source_stage = str(data.get("source_stage") or "").strip()
+        data["source_stage"] = source_stage or None
         return data
 
 class ComplianceLinkedRow(BaseModel):
     requirement: str = ""
     requirement_ref: str = ""
-    status: ComplianceStatus = "not_satisfied"
+    status: ComplianceStatus | None = None
     rationale: str = ""
     gap: str = ""
     recommendation: str = ""
@@ -115,7 +128,8 @@ class ComplianceLinkedRow(BaseModel):
         # IMPORTANT:
         # Status must come ONLY from LLM output.
         # Evidence presence must NOT upgrade status.
-        data["status"] = _normalize_compliance_status(data.get("status"))
+        if data.get("status") is not None:
+            data["status"] = _normalize_compliance_status(data.get("status"))
         data["rationale"] = str(data.get("rationale") or "").strip()
         return data
 

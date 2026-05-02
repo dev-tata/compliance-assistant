@@ -291,19 +291,30 @@ def _find_evaluation_v3_run_dir(*, compliance_saved_at: str) -> Path:
     return max(matches, key=lambda path: path.stat().st_mtime)
 
 
-def _copy_case_outputs(*, run_dir: Path, target_dir: Path) -> tuple[Path, Path]:
+def _copy_case_outputs(*, compliance_saved_at: str, run_dir: Path, target_dir: Path) -> tuple[Path, Path]:
     target_dir.mkdir(parents=True, exist_ok=True)
+    compliance_result_path = BACKEND_DIR / compliance_saved_at
     result_path = run_dir / "evaluation_v3_result.json"
     summary_path = run_dir / "evaluation_v3_summary.json"
+    debug_json_path = next(run_dir.glob("*_debug.json"), None)
+    debug_csv_path = next(run_dir.glob("*_debug.csv"), None)
     if not result_path.exists():
         raise FileNotFoundError(f"Missing evaluation_v3_result.json in {run_dir}")
     if not summary_path.exists():
         raise FileNotFoundError(f"Missing evaluation_v3_summary.json in {run_dir}")
+    if not compliance_result_path.exists():
+        raise FileNotFoundError(f"Missing compliance result JSON: {compliance_result_path}")
 
+    copied_compliance_path = target_dir / "compliance_result.json"
     copied_result_path = target_dir / "evaluation_v3_result.json"
     copied_summary_path = target_dir / "evaluation_v3_summary.json"
+    shutil.copy2(compliance_result_path, copied_compliance_path)
     shutil.copy2(result_path, copied_result_path)
     shutil.copy2(summary_path, copied_summary_path)
+    if debug_json_path and debug_json_path.exists():
+        shutil.copy2(debug_json_path, target_dir / "evaluation_v3_debug.json")
+    if debug_csv_path and debug_csv_path.exists():
+        shutil.copy2(debug_csv_path, target_dir / "evaluation_v3_debug.csv")
     return copied_result_path, copied_summary_path
 
 
@@ -338,7 +349,7 @@ def _write_aggregate_summary(
         total_satisfied += int(payload.get("satisfied") or 0)
         total_partial += int(payload.get("partial") or 0)
         total_not_satisfied += int(payload.get("not_satisfied") or 0)
-        coverage_values.append(float(payload.get("avg_subsection_coverage") or 0.0))
+        coverage_values.append(float(payload.get("avg_evidence_coverage") or 0.0))
         grounded_values.append(float(payload.get("avg_grounded_evidence") or 0.0))
 
     aggregate_payload = {
@@ -520,6 +531,7 @@ def main() -> None:
                     compliance_saved_at=response.saved_at,
                 )
                 _, copied_summary_path = _copy_case_outputs(
+                    compliance_saved_at=response.saved_at,
                     run_dir=evaluation_run_dir,
                     target_dir=target_dir,
                 )

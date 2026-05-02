@@ -120,6 +120,10 @@ def build_evaluation_unit(
         record_nodes=record_nodes,
         reference_nodes=reference_nodes,
     )
+    stage_3 = _merge_stage_3_grounded_record_evidence(
+        stage_2=stage_2,
+        stage_3=stage_3,
+    )
 
     (
         base_required_evidence_count,
@@ -231,6 +235,7 @@ def build_evaluation_unit(
     metrics = _build_metrics(
         evidence_status=evidence_status,
         final_label=final_label,
+        required_evidence_count=resolved_required_evidence_count,
         stage_judgments=(stage_1, stage_2, stage_3),
         record_nodes=record_nodes,
     )
@@ -296,7 +301,7 @@ def calculate_aggregate_metrics(units: Sequence[EvaluationUnit]) -> EvaluationV3
             missing_count=0,
             conflicting_count=0,
             avg_grounded_evidence_count=0.0,
-            avg_subsection_coverage_ratio=0.0,
+            avg_evidence_coverage_ratio=0.0,
         )
 
     return EvaluationV3Metrics(
@@ -310,22 +315,67 @@ def calculate_aggregate_metrics(units: Sequence[EvaluationUnit]) -> EvaluationV3
             sum(_resolve_debug_grounded_evidence_count(unit) for unit in units) / len(units),
             4,
         ),
-        avg_subsection_coverage_ratio=round(
-            sum(_resolve_debug_subsection_coverage_ratio(unit) for unit in units) / len(units),
+        avg_evidence_coverage_ratio=round(
+            sum(_resolve_debug_evidence_coverage_ratio(unit) for unit in units) / len(units),
             4,
         ),
     )
 
 
 def build_evaluation_v3_result_row(unit: EvaluationUnit) -> EvaluationV3ResultRow:
+    stage_1_grounded_evidence_count = _resolve_stage_grounded_evidence_count(
+        stage_judgment=unit.stage_1_answer,
+        record_nodes=unit.record_evidence_chunks,
+    )
+    stage_2_grounded_evidence_count = _resolve_stage_grounded_evidence_count(
+        stage_judgment=unit.stage_2_answer,
+        record_nodes=unit.record_evidence_chunks,
+    )
+    stage_3_grounded_evidence_count = _resolve_stage_grounded_evidence_count(
+        stage_judgment=unit.stage_3_answer,
+        record_nodes=unit.record_evidence_chunks,
+    )
     return EvaluationV3ResultRow(
         deliverable_id=unit.deliverable.deliverable_id,
         final_label=unit.final_label,
+        stage_1_label=unit.stage_1_answer.label,
+        stage_2_label=unit.stage_2_answer.label,
+        stage_3_label=unit.stage_3_answer.label,
+        stage_1_evidence_status=_resolve_stage_evidence_status(
+            stage_judgment=unit.stage_1_answer,
+            grounded_evidence_count=stage_1_grounded_evidence_count,
+            required_evidence_count=unit.required_evidence_count,
+        ),
+        stage_2_evidence_status=_resolve_stage_evidence_status(
+            stage_judgment=unit.stage_2_answer,
+            grounded_evidence_count=stage_2_grounded_evidence_count,
+            required_evidence_count=unit.required_evidence_count,
+        ),
+        stage_3_evidence_status=_resolve_stage_evidence_status(
+            stage_judgment=unit.stage_3_answer,
+            grounded_evidence_count=stage_3_grounded_evidence_count,
+            required_evidence_count=unit.required_evidence_count,
+        ),
+        stage_1_grounded_evidence_count=stage_1_grounded_evidence_count,
+        stage_2_grounded_evidence_count=stage_2_grounded_evidence_count,
+        stage_3_grounded_evidence_count=stage_3_grounded_evidence_count,
+        stage_1_evidence_coverage_ratio=_compute_evidence_coverage_ratio(
+            grounded_evidence_count=stage_1_grounded_evidence_count,
+            required_evidence_count=int(unit.required_evidence_count or 0),
+        ),
+        stage_2_evidence_coverage_ratio=_compute_evidence_coverage_ratio(
+            grounded_evidence_count=stage_2_grounded_evidence_count,
+            required_evidence_count=int(unit.required_evidence_count or 0),
+        ),
+        stage_3_evidence_coverage_ratio=_compute_evidence_coverage_ratio(
+            grounded_evidence_count=stage_3_grounded_evidence_count,
+            required_evidence_count=int(unit.required_evidence_count or 0),
+        ),
         evidence_status=unit.evidence_status,
         grounded_evidence_count=_resolve_debug_grounded_evidence_count(unit),
         grounded_chunk_count=_resolve_debug_grounded_chunk_count(unit),
         required_evidence_count=unit.required_evidence_count,
-        subsection_coverage_ratio=_resolve_debug_subsection_coverage_ratio(unit),
+        evidence_coverage_ratio=_resolve_debug_evidence_coverage_ratio(unit),
         has_conflict=_resolve_debug_has_conflict(unit),
         contradiction_type=unit.contradiction_type,
     )
@@ -350,7 +400,7 @@ def build_evaluation_v3_summary(rows: Sequence[EvaluationV3ResultRow]) -> dict[s
             "missing": 0,
             "conflicting": 0,
             "avg_grounded_evidence": 0.0,
-            "avg_subsection_coverage": 0.0,
+            "avg_evidence_coverage": 0.0,
         }
 
     return {
@@ -365,8 +415,8 @@ def build_evaluation_v3_summary(rows: Sequence[EvaluationV3ResultRow]) -> dict[s
             sum(int(row.grounded_evidence_count or 0) for row in rows) / total_units,
             4,
         ),
-        "avg_subsection_coverage": round(
-            sum(float(row.subsection_coverage_ratio or 0.0) for row in rows) / total_units,
+        "avg_evidence_coverage": round(
+            sum(float(row.evidence_coverage_ratio or 0.0) for row in rows) / total_units,
             4,
         ),
     }
@@ -412,6 +462,7 @@ def build_debug_report_rows(units: Sequence[EvaluationUnit]) -> list[dict[str, A
             "evidence_status": unit.evidence_status,
             "required_evidence_count": unit.required_evidence_count,
             "grounded_evidence_count": _resolve_debug_grounded_evidence_count(unit),
+            "evidence_coverage_ratio": _resolve_debug_evidence_coverage_ratio(unit),
             "grounded_chunk_count": _resolve_debug_grounded_chunk_count(unit),
             "grounded_subsection_count": len(_resolve_debug_grounded_subsection_ids(unit)),
             "has_conflict": _resolve_debug_has_conflict(unit),
@@ -494,7 +545,7 @@ def build_compact_summary(units: Sequence[EvaluationUnit]) -> dict[str, Any]:
         "missing": sum(1 for row in rows if row.get("evidence_status") == "missing"),
         "conflicting": sum(1 for row in rows if row.get("evidence_status") == "conflicting"),
         "avg_coverage": round(
-            sum(float(row.get("subsection_coverage_ratio") or 0.0) for row in rows) / total_units,
+            sum(float(row.get("evidence_coverage_ratio") or 0.0) for row in rows) / total_units,
             4,
         ),
         "avg_grounded": round(
@@ -517,6 +568,7 @@ def build_edge_case_debug_rows(units: Sequence[EvaluationUnit]) -> list[dict[str
         "evidence_status",
         "required_evidence_count",
         "grounded_evidence_count",
+        "evidence_coverage_ratio",
         "grounded_subsection_count",
         "subsection_coverage_ratio",
         "has_conflict",
@@ -676,6 +728,7 @@ def _coerce_stage_judgment(
         rationale=str(rationale or ""),
         conflict_flag=conflict_flag,
         supporting_record_evidence_ids=record_ids,
+        supporting_record_evidence_items=_normalize_stage_record_evidence_items(payload.get("evidence_items")),
         supporting_reference_ids=reference_ids,
     )
 
@@ -693,6 +746,28 @@ def _resolve_stage_record_evidence_ids(payload: dict[str, Any], record_nodes: Se
 
     text_candidates = _extract_text_candidates(payload, keys=("evidence", "record_evidence", "record_quotes"))
     return _match_texts_to_record_nodes(text_candidates, record_nodes)
+
+
+def _normalize_stage_record_evidence_items(raw_items: Any) -> list[dict[str, str]]:
+    if not isinstance(raw_items, list):
+        return []
+    normalized_items: list[dict[str, str]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        normalized = {
+            "evidence_id": str(item.get("evidence_id") or "").strip(),
+            "section_id": str(item.get("section_id") or "").strip(),
+            "subsection_id": str(item.get("subsection_id") or "").strip(),
+            "section_label": str(item.get("section_label") or "").strip(),
+            "heading_title": str(item.get("heading_title") or "").strip(),
+            "source_document": str(item.get("source_document") or "").strip(),
+            "source_stage": str(item.get("source_stage") or "").strip(),
+            "text": str(item.get("text") or "").strip(),
+        }
+        if normalized["text"]:
+            normalized_items.append(normalized)
+    return normalized_items
 
 
 def _resolve_stage_reference_ids(payload: dict[str, Any], reference_nodes: Sequence[ReferenceNode]) -> list[str]:
@@ -888,6 +963,7 @@ def _build_metrics(
     *,
     evidence_status: str,
     final_label: ComplianceLabel | None,
+    required_evidence_count: int,
     stage_judgments: Sequence[StageJudgment],
     record_nodes: Sequence[EvidenceNode],
 ) -> EvaluationV3Metrics:
@@ -908,12 +984,12 @@ def _build_metrics(
                 record_nodes=record_nodes,
             )
         ),
-        avg_subsection_coverage_ratio=round(
-            _compute_subsection_coverage_ratio_from_nodes(
-                grounded_nodes=grounded_nodes,
+        avg_evidence_coverage_ratio=_compute_evidence_coverage_ratio(
+            grounded_evidence_count=_count_grounded_record_evidence(
+                stage_judgments=stage_judgments,
                 record_nodes=record_nodes,
             ),
-            4,
+            required_evidence_count=required_evidence_count,
         ),
     )
 
@@ -988,6 +1064,19 @@ def _resolve_debug_grounded_evidence_count(unit: EvaluationUnit) -> int:
     )
 
 
+def _resolve_stage_grounded_evidence_count(
+    *,
+    stage_judgment: StageJudgment,
+    record_nodes: Sequence[EvidenceNode],
+) -> int:
+    return len(
+        _resolve_stage_grounded_record_evidence_items(
+            stage_judgment=stage_judgment,
+            record_nodes=record_nodes,
+        )
+    )
+
+
 def _resolve_debug_grounded_chunk_count(unit: EvaluationUnit) -> int:
     grounded_nodes = _resolve_grounded_record_nodes(
         stage_judgments=(unit.stage_1_answer, unit.stage_2_answer, unit.stage_3_answer),
@@ -1037,6 +1126,36 @@ def _resolve_debug_subsection_coverage_ratio(unit: EvaluationUnit) -> float:
         ),
         4,
     )
+
+
+def _resolve_debug_evidence_coverage_ratio(unit: EvaluationUnit) -> float:
+    return _compute_evidence_coverage_ratio(
+        grounded_evidence_count=_resolve_debug_grounded_evidence_count(unit),
+        required_evidence_count=int(unit.required_evidence_count or 0),
+    )
+
+
+def _resolve_stage_evidence_status(
+    *,
+    stage_judgment: StageJudgment,
+    grounded_evidence_count: int,
+    required_evidence_count: int,
+) -> str:
+    return _resolve_evidence_status(
+        grounded_record_evidence_count=grounded_evidence_count,
+        required_evidence_count=required_evidence_count,
+        conflict_detected=bool(stage_judgment.conflict_flag),
+    )
+
+
+def _compute_evidence_coverage_ratio(
+    *,
+    grounded_evidence_count: int,
+    required_evidence_count: int,
+) -> float:
+    if required_evidence_count <= 0:
+        return 0.0
+    return round(grounded_evidence_count / required_evidence_count, 4)
 
 
 def _compute_subsection_coverage_ratio_from_nodes(
@@ -1295,6 +1414,91 @@ def _resolve_grounded_record_evidence_items(
         accepted_record_id_set = {
             evidence_id
             for evidence_id in selected_stage.supporting_record_evidence_ids
+            if evidence_id
+        }
+        return [
+            {
+                "evidence_id": node.evidence_id,
+                "section_id": node.section_id,
+                "subsection_id": node.subsection_id,
+                "section_label": node.section_label,
+                "heading_title": node.heading_title,
+                "source_document": node.source_document,
+                "text": node.text,
+            }
+            for node in record_nodes
+            if node.evidence_id and node.evidence_id in accepted_record_id_set
+        ]
+    grounded_items: list[dict[str, str]] = []
+    for item in accepted_items:
+        if _match_record_item_to_nodes(item, record_nodes):
+            grounded_items.append(item)
+    return grounded_items
+
+
+def _merge_stage_3_grounded_record_evidence(
+    *,
+    stage_2: StageJudgment,
+    stage_3: StageJudgment,
+) -> StageJudgment:
+    if stage_3.conflict_flag:
+        return stage_3
+
+    merged_ids = _dedupe(
+        [
+            *list(stage_2.supporting_record_evidence_ids),
+            *list(stage_3.supporting_record_evidence_ids),
+        ]
+    )
+    merged_items = _merge_stage_record_evidence_items(
+        primary_items=list(stage_3.supporting_record_evidence_items),
+        fallback_items=list(stage_2.supporting_record_evidence_items),
+    )
+    return stage_3.model_copy(
+        update={
+            "supporting_record_evidence_ids": merged_ids,
+            "supporting_record_evidence_items": merged_items,
+        }
+    )
+
+
+def _merge_stage_record_evidence_items(
+    *,
+    primary_items: list[dict[str, str]],
+    fallback_items: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    merged_items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in [*primary_items, *fallback_items]:
+        key = _stage_record_item_key(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged_items.append(item)
+    return merged_items
+
+
+def _stage_record_item_key(item: dict[str, str]) -> str:
+    evidence_id = str(item.get("evidence_id") or "").strip()
+    if evidence_id:
+        return f"id:{evidence_id}"
+    text = str(item.get("text") or "").strip().lower()
+    source_document = str(item.get("source_document") or "").strip().lower()
+    if not text:
+        return ""
+    return f"text:{source_document}|{text}"
+
+
+def _resolve_stage_grounded_record_evidence_items(
+    *,
+    stage_judgment: StageJudgment,
+    record_nodes: Sequence[EvidenceNode],
+) -> list[dict[str, str]]:
+    accepted_items = list(stage_judgment.supporting_record_evidence_items)
+    if not accepted_items:
+        accepted_record_id_set = {
+            evidence_id
+            for evidence_id in stage_judgment.supporting_record_evidence_ids
             if evidence_id
         }
         return [

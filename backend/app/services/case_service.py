@@ -486,27 +486,34 @@ def _find_evaluation_v3_result_path(compliance_saved_at: str) -> Path | None:
     for run_dir in sorted(EVALUATION_V3_RUNTIME_DIR.iterdir(), reverse=True):
         if not run_dir.is_dir():
             continue
-        result_path = next(
-            (
-                path
-                for path in run_dir.iterdir()
-                if path.is_file()
-                and path.suffix == ".json"
-                and path.name.endswith("_evaluation_v3.json")
+        candidate_paths = [
+            run_dir / "evaluation_v3_result.json",
+            next(
+                (
+                    path
+                    for path in run_dir.iterdir()
+                    if path.is_file()
+                    and path.suffix == ".json"
+                    and path.name.endswith("_evaluation_v3.json")
+                ),
+                None,
             ),
-            None,
-        )
-        if result_path is None:
+        ]
+        matching_path: Path | None = None
+        for result_path in candidate_paths:
+            if result_path is None or not result_path.exists() or not result_path.is_file():
+                continue
+            try:
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            if str(payload.get("source_compliance_saved_at") or "").strip() == compliance_saved_at:
+                matching_path = result_path
+                break
+        if matching_path is None:
             continue
-        try:
-            payload = json.loads(result_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            continue
-        if str(payload.get("source_compliance_saved_at") or "").strip() == compliance_saved_at:
-            return result_path
+        return matching_path
     return None
-
-
 def _normalize_compliance_analysis_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"completion_percent": 0}

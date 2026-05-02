@@ -404,6 +404,7 @@ def _write_debug_csv(*, csv_path: Path, rows: list[dict[str, Any]]) -> None:
         "evidence_status",
         "required_evidence_count",
         "grounded_evidence_count",
+        "evidence_coverage_ratio",
         "grounded_chunk_count",
         "grounded_subsection_count",
         "has_conflict",
@@ -453,6 +454,13 @@ def _build_stage_output(
     evidence_items = list(_payload_value(finding, "evidence_items", [])) if finding is not None else []
     rationale = str(_payload_value(linked_row, "rationale", "")) if linked_row is not None else ""
     reference_ids = supporting_reference_ids or []
+    record_ids = _dedupe_preserve_order(
+        [
+            str(_payload_value(item, "evidence_id", "") or "").strip()
+            for item in evidence_items
+            if str(_payload_value(item, "evidence_id", "") or "").strip()
+        ]
+    )
     label = _derive_stage_label_from_grounding(
         rationale=rationale,
         evidence_items=evidence_items,
@@ -483,10 +491,12 @@ def _build_stage_output(
                 "section_label": _payload_value(item, "section_label", ""),
                 "heading_title": _payload_value(item, "heading_title", ""),
                 "source_document": _payload_value(item, "source_document", ""),
+                "source_stage": _payload_value(item, "source_stage", ""),
                 "text": _payload_value(item, "text", ""),
             }
             for item in evidence_items
         ],
+        "supporting_record_evidence_ids": record_ids,
         "conflict_flag": conflict_flag,
         "contradiction_type": contradiction_type,
         "supporting_reference_ids": reference_ids,

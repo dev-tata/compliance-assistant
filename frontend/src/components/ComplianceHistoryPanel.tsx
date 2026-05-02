@@ -131,23 +131,12 @@ export function ComplianceHistoryPanel({
                     <div className="history-main">
                       <div className="history-title-row">
                         <span className="history-case">{caseTitleById.get(item.case_id) ?? item.case_id}</span>
-                        <span className="history-status-group">
-                          <span className="history-status-chip history-status-chip-satisfied">SATISFIED</span>
-                          <strong className="history-status-count">{item.satisfied_count}</strong>
-                        </span>
-                        <span className="history-status-group">
-                          <span className="history-status-chip history-status-chip-partial">PARTIAL</span>
-                          <strong className="history-status-count">{item.partial_count}</strong>
-                        </span>
-                        <span className="history-status-group">
-                          <span className="history-status-chip history-status-chip-not-satisfied">NOT_SATISFIED</span>
-                          <strong className="history-status-count">{item.not_satisfied_count}</strong>
+                        <span className="document-option-meta">
+                          {item.provider} · <strong>{item.model}</strong> · <strong>{formatMethodLabel(item.method)}</strong> · {formatDateTime(item.created_at)}
                         </span>
                       </div>
                       <div className="history-meta-row document-option-meta">
-                        <span>
-                          {item.provider} · <strong>{item.model}</strong> · Method: <strong>{formatMethodLabel(item.method)}</strong> · Created: {formatDateTime(item.created_at)} · <code>{item.file_name}</code>
-                        </span>
+                        <code>{item.file_name}</code>
                       </div>
                     </div>
                     <div className="actions history-actions">
@@ -155,6 +144,7 @@ export function ComplianceHistoryPanel({
                         className="button button-small button-ghost"
                         onClick={() => onShowDocuments(item.case_id, item.file_name)}
                         disabled={busy === `case-docs:${item.case_id}`}
+                        title={isDocumentsOpen ? "Close documents" : "Documents"}
                       >
                         {isDocumentsOpen ? "Close documents" : "Documents"}
                       </button>
@@ -162,6 +152,7 @@ export function ComplianceHistoryPanel({
                         className="button button-small"
                         onClick={() => onSelectCompliance(item.case_id, item.file_name)}
                         disabled={busy === `compliance-history:${item.file_name}`}
+                        title="Results"
                       >
                         Results
                       </button>
@@ -169,6 +160,7 @@ export function ComplianceHistoryPanel({
                         className="button button-small button-danger"
                         onClick={() => onDeleteCompliance(item.case_id, item.file_name)}
                         disabled={busy === `delete-compliance:${item.file_name}`}
+                        title="Delete"
                       >
                         Delete
                       </button>
