@@ -123,6 +123,7 @@ def _build_sections_from_docling(
 
     if preamble_lines:
         preamble_text = "\n\n".join(_collapse_blank_lines(preamble_lines)).strip()
+        preamble_text = _clean_synthetic_metadata(preamble_text)
         if preamble_text:
             sections.insert(
                 0,
@@ -209,6 +210,7 @@ def _update_section_pages(section: ParsedSection, item: Any) -> None:
 
 
 def _append_text(section: ParsedSection, text: str) -> None:
+    text = _clean_synthetic_metadata(text)
     if not section.text:
         section.text = text
         return
@@ -217,6 +219,18 @@ def _append_text(section: ParsedSection, text: str) -> None:
         return
 
     section.text = f"{section.text}\n\n{text}"
+
+
+def _clean_synthetic_metadata(text: str) -> str:
+    """Remove synthetic dataset metadata lines from text."""
+    lines = text.splitlines()
+    cleaned_lines = []
+    for line in lines:
+        # Skip lines that contain synthetic metadata patterns
+        if re.search(r"(Document type|Final label|Status):\s*", line.strip()):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
 
 
 def _collapse_blank_lines(lines: list[str]) -> list[str]:

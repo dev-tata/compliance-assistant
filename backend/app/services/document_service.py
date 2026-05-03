@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,8 @@ from app.services.storage_paths import (
 )
 
 REGISTRY_PATH = DOCUMENT_REGISTRY_PATH
+CURRENT_PARSED_DOCUMENT_CACHE_VERSION = "parsed_document_v2"
+logger = logging.getLogger(__name__)
 
 
 def current_timestamp() -> str:
@@ -124,13 +127,19 @@ def get_or_parse_document(
 ) -> ParsedDocument:
     cached_path = get_cached_parse_path(document)
     if cached_path.exists():
-        if registry[index].get("parsed_json_at") != cached_path.as_posix():
-            registry[index]["parsed_json_at"] = cached_path.as_posix()
-            save_document_registry(registry)
-        parsed_document = ParsedDocument.model_validate_json(cached_path.read_text(encoding="utf-8"))
-        return parsed_document
+        cached_payload = _load_cached_parse_payload(cached_path)
+        if cached_payload is not None and _parsed_cache_is_current(cached_payload):
+            if registry[index].get("parsed_json_at") != cached_path.as_posix():
+                registry[index]["parsed_json_at"] = cached_path.as_posix()
+                save_document_registry(registry)
+            return ParsedDocument.model_validate(cached_payload)
+        logger.info(
+            "Reparsing document due to stale parsed cache: %s",
+            document.source_filename or document.stored_filename,
+        )
 
     parsed_document = parse_document(document)
+    parsed_document.metadata["parsed_cache_version"] = CURRENT_PARSED_DOCUMENT_CACHE_VERSION
     cached_path.write_text(
         parsed_document.model_dump_json(
             indent=2,
@@ -705,3 +714,17 @@ def _flatten_parsed_sections(
 
 def _normalized_text(value: Any) -> str:
     return " ".join(str(value or "").split()).strip().lower()
+
+
+def _load_cached_parse_payload(path: Path) -> dict[str, Any] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _parsed_cache_is_current(payload: dict[str, Any]) -> bool:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    return metadata.get("parsed_cache_version") == CURRENT_PARSED_DOCUMENT_CACHE_VERSION

@@ -18,6 +18,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.append(str(BACKEND_ROOT))
 
 from evaluation_v3 import (  # noqa: E402
+    EvaluationUnit,
     build_edge_case_debug_rows,
     build_debug_report_rows,
     build_debug_report_summary,
@@ -30,7 +31,12 @@ from evaluation_v3 import (  # noqa: E402
     calculate_aggregate_metrics,
     evaluation_v3_config,
 )
-from evaluation_v3.builder import CONFLICT_MARKERS  # noqa: E402
+from evaluation_v3.builder import (  # noqa: E402
+    CONFLICT_MARKERS,
+    _does_grounded_quote_support_element,
+    _match_record_item_to_nodes,
+    _resolve_stage_grounded_record_evidence_items,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +135,7 @@ def write_evaluation_v3_runtime_output(
                     {
                         "deliverable_id": unit.deliverable.deliverable_id,
                         "stage_3_label": unit.stage_3_answer.label,
-                        "final_label": result_rows_by_id[unit.deliverable.deliverable_id].final_label,
+                        "quote_label": result_rows_by_id[unit.deliverable.deliverable_id].quote_label,
                         "evidence_status": result_rows_by_id[unit.deliverable.deliverable_id].evidence_status,
                         "grounded_evidence_count": result_rows_by_id[
                             unit.deliverable.deliverable_id
@@ -142,6 +148,25 @@ def write_evaluation_v3_runtime_output(
                     for unit in sorted(units, key=lambda item: item.deliverable.deliverable_id)
                 ],
             },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    retrieval_debug_export_path = build_evaluation_v3_retrieval_debug_export_path(run_dir=run_dir)
+    retrieval_debug_export_path.write_text(
+        json.dumps(
+            _build_retrieval_debug_payload(
+                case_id=case_id,
+                compliance_response=compliance_response,
+                deliverables=deliverables,
+                retrieved_payload=retrieved_payload,
+                source_saved_path=saved_path,
+                units_by_deliverable_id={
+                    unit.deliverable.deliverable_id: unit
+                    for unit in units
+                },
+            ),
             indent=2,
             ensure_ascii=False,
         ),
@@ -286,6 +311,10 @@ def build_evaluation_v3_comparison_export_path(*, run_dir: Path) -> Path:
     return run_dir / "evaluation_comparison.json"
 
 
+def build_evaluation_v3_retrieval_debug_export_path(*, run_dir: Path) -> Path:
+    return run_dir / "evaluation_v3_retrieval_debug.json"
+
+
 def build_evaluation_v3_runtime_dir(*, case_id: str) -> Path:
     _ensure_evaluation_v3_runtime_dir()
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -348,13 +377,13 @@ def _write_debug_reports(
             )
         if (
             int(row.get("grounded_evidence_count") or 0) == 0
-            and row.get("final_label") != "not_satisfied"
+            and row.get("quote_label") != "not_satisfied"
         ):
             logger.warning(
-                "Final label inconsistency in evaluation_v3 "
-                "[deliverable_id=%s grounded_evidence_count=0 final_label=%s]",
+                "Quote label inconsistency in evaluation_v3 "
+                "[deliverable_id=%s grounded_evidence_count=0 quote_label=%s]",
                 row.get("deliverable_id") or "",
-                row.get("final_label") or "",
+                row.get("quote_label") or "",
             )
         if (
             row.get("contradiction_type") not in {"none", "missing_evidence"}
@@ -400,11 +429,23 @@ def _write_debug_csv(*, csv_path: Path, rows: list[dict[str, Any]]) -> None:
         "weight",
         "weight_modifier",
         "required_evidence_count_reason",
-        "final_label",
+        "quote_label",
+        "evidence_audit_status",
         "evidence_status",
         "required_evidence_count",
         "grounded_evidence_count",
         "evidence_coverage_ratio",
+        "required_element_count",
+        "supported_element_count",
+        "missing_element_count",
+        "contradicted_element_count",
+        "weak_match_element_count",
+        "total_conflict_findings",
+        "conflicted_element_ids",
+        "final_element_coverage_ratio",
+        "stage_1_element_coverage_ratio",
+        "stage_2_element_coverage_ratio",
+        "stage_3_element_coverage_ratio",
         "grounded_chunk_count",
         "grounded_subsection_count",
         "has_conflict",
@@ -420,6 +461,21 @@ def _write_debug_csv(*, csv_path: Path, rows: list[dict[str, Any]]) -> None:
         "stage_1_label",
         "stage_2_label",
         "stage_3_label",
+        "stage_1_evidence_pipeline",
+        "stage_2_evidence_pipeline",
+        "stage_3_evidence_pipeline",
+        "requirement_elements",
+        "stage_1_element_assessment",
+        "stage_2_element_assessment",
+        "stage_3_element_assessment",
+        "final_element_assessment",
+        "conflict_count",
+        "conflict_type",
+        "conflict_types",
+        "conflicting_element_ids",
+        "conflicting_evidence_ids",
+        "conflicting_quotes",
+        "conflict_reason",
         "rationale",
     ]
     with open(csv_path, "w", encoding="utf-8", newline="") as file:
@@ -438,6 +494,322 @@ def _write_manual_debug_export(*, case_id: str, debug_payload_path: Path) -> Non
     shutil.copy2(debug_payload_path, target_path)
     latest_path = EVALUATION_V3_MANUAL_COMPARISONS_DIR / "evaluation_v3_debug_export.json"
     shutil.copy2(debug_payload_path, latest_path)
+
+
+def _build_retrieval_debug_payload(
+    *,
+    case_id: str,
+    compliance_response: ComplianceResponse,
+    deliverables: list[dict[str, Any]],
+    retrieved_payload: list[dict[str, Any]],
+    source_saved_path: Path,
+    units_by_deliverable_id: dict[str, EvaluationUnit],
+) -> dict[str, Any]:
+    aligned_inputs = _build_evaluation_v3_input_mapping(
+        deliverables=deliverables,
+        compliance_response=compliance_response,
+        retrieved_payload=retrieved_payload,
+    )
+    stage_results = {stage.stage_key: stage for stage in compliance_response.stages}
+    tracked_stage_keys = ("stage_2_record_retrieval", "stage_3_reference_retrieval")
+    return {
+        "case_id": case_id,
+        "created_at": _current_timestamp(),
+        "source_evaluation_v3_path": source_saved_path.as_posix(),
+        "stage_keys": list(tracked_stage_keys),
+        "requirements": [
+            _build_requirement_retrieval_debug_entry(
+                requirement_key=requirement_key,
+                aligned=aligned_inputs[requirement_key],
+                stage_results=stage_results,
+                tracked_stage_keys=tracked_stage_keys,
+                unit=units_by_deliverable_id.get(requirement_key),
+            )
+            for requirement_key in sorted(aligned_inputs)
+        ],
+    }
+
+
+def _build_requirement_retrieval_debug_entry(
+    *,
+    requirement_key: str,
+    aligned: dict[str, Any],
+    stage_results: dict[str, ComplianceStageResult],
+    tracked_stage_keys: tuple[str, ...],
+    unit: EvaluationUnit | None,
+) -> dict[str, Any]:
+    deliverable = aligned.get("deliverable") or {}
+    retrieved_row = aligned.get("retrieved_rows") or {}
+    requirement_ref = str(retrieved_row.get("requirement_ref") or requirement_key).strip() or requirement_key
+    requirement_text = str(deliverable.get("requirement_text") or "")
+    retrieved_sections = _with_record_ids(
+        deliverable_id=requirement_key,
+        chunks=list(retrieved_row.get("retrieved_record_sections") or []),
+    )
+    return {
+        "requirement_id": requirement_ref,
+        "deliverable_id": requirement_key,
+        "requirement_text": requirement_text,
+        "stages": {
+            stage_key: _build_stage_retrieval_debug_entry(
+                stage_key=stage_key,
+                stage_label=stage_results[stage_key].stage_label if stage_key in stage_results else stage_key,
+                requirement_key=requirement_key,
+                retrieved_sections=retrieved_sections,
+                finding=aligned.get("findings", {}).get(stage_key),
+                linked_row=aligned.get("linked_rows", {}).get(stage_key),
+                unit=unit,
+            )
+            for stage_key in tracked_stage_keys
+        },
+    }
+
+
+def _build_stage_retrieval_debug_entry(
+    *,
+    stage_key: str,
+    stage_label: str,
+    requirement_key: str,
+    retrieved_sections: list[dict[str, Any]],
+    finding: dict[str, Any] | None,
+    linked_row: dict[str, Any] | None,
+    unit: EvaluationUnit | None,
+) -> dict[str, Any]:
+    accepted_evidence_items = list(_payload_value(finding, "evidence_items", [])) if finding is not None else []
+    accepted_evidence_texts = list(_payload_value(finding, "evidence", [])) if finding is not None else []
+    grounded_evidence_annotations: list[dict[str, Any]] = []
+    if unit is not None:
+        accepted_evidence_items = _resolve_stage_debug_accepted_evidence_items(
+            unit=unit,
+            stage_key=stage_key,
+        )
+        grounded_evidence_annotations = _resolve_stage_grounded_evidence_annotations(
+            unit=unit,
+            stage_key=stage_key,
+        )
+    elif not accepted_evidence_items and accepted_evidence_texts:
+        accepted_evidence_items = [{"text": text} for text in accepted_evidence_texts]
+
+    return {
+        "stage_key": stage_key,
+        "stage_label": stage_label,
+        "status": _payload_value(finding, "status", None),
+        "linked_row_status": _payload_value(linked_row, "status", None),
+        "rationale": _payload_value(linked_row, "rationale", ""),
+        "accepted_evidence": [
+            _serialize_accepted_evidence_item(item)
+            for item in accepted_evidence_items
+        ],
+        "retrieved_record_sections": [
+            _build_retrieval_candidate_debug_entry(
+                requirement_key=requirement_key,
+                rank=index + 1,
+                section=section,
+                grounded_evidence_annotations=grounded_evidence_annotations,
+            )
+            for index, section in enumerate(retrieved_sections)
+        ],
+        "retrieved_candidate_count": len(retrieved_sections),
+    }
+
+
+def _build_retrieval_candidate_debug_entry(
+    *,
+    requirement_key: str,
+    rank: int,
+    section: dict[str, Any],
+    grounded_evidence_annotations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    matched_evidence = [
+        _serialize_grounded_debug_evidence_item(item)
+        for item in grounded_evidence_annotations
+        if _grounded_debug_evidence_matches_section(section=section, grounded_item=item)
+    ]
+    return {
+        "requirement_id": str(section.get("requirement_ref") or requirement_key),
+        "deliverable_id": requirement_key,
+        "rank": rank,
+        "section_id": section.get("section_id"),
+        "subsection_id": section.get("subsection_id"),
+        "section_label": section.get("section_label"),
+        "heading_title": section.get("heading_title"),
+        "source_document": section.get("source_document"),
+        "text_preview": _build_text_preview(
+            text=section.get("text"),
+            table_markdown=section.get("table_markdown"),
+        ),
+        "raw_retrieval_score": section.get("raw_retrieval_score"),
+        "reranker_score": section.get("reranker_score"),
+        "retrieval_score": section.get("retrieval_score"),
+        "faiss_score": section.get("faiss_score"),
+        "selected_as_accepted_evidence": bool(matched_evidence),
+        "matched_evidence": matched_evidence,
+    }
+
+
+def _serialize_accepted_evidence_item(item: Any) -> dict[str, Any]:
+    return {
+        "evidence_id": _payload_value(item, "evidence_id", ""),
+        "text": _payload_value(item, "text", ""),
+        "source_document": _payload_value(item, "source_document", ""),
+        "section_id": _payload_value(item, "section_id", ""),
+        "subsection_id": _payload_value(item, "subsection_id", ""),
+        "heading_title": _payload_value(item, "heading_title", ""),
+        "source_stage": _payload_value(item, "source_stage", ""),
+        "stage_key": _payload_value(item, "stage_key", ""),
+    }
+
+
+def _serialize_grounded_debug_evidence_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "evidence_id": item.get("evidence_id", ""),
+        "text": item.get("text", ""),
+        "source_document": item.get("source_document", ""),
+        "section_id": item.get("section_id", ""),
+        "subsection_id": item.get("subsection_id", ""),
+        "heading_title": item.get("heading_title", ""),
+        "source_stage": item.get("source_stage", ""),
+        "stage_key": item.get("stage_key", ""),
+        "element_ids": list(item.get("element_ids", [])),
+        "grounding_status": item.get("grounding_status", ""),
+    }
+
+
+def _grounded_debug_evidence_matches_section(*, section: dict[str, Any], grounded_item: dict[str, Any]) -> bool:
+    section_evidence_id = str(section.get("evidence_id") or "").strip()
+    grounded_record_evidence_ids = [
+        str(evidence_id or "").strip()
+        for evidence_id in grounded_item.get("grounded_record_evidence_ids", [])
+        if str(evidence_id or "").strip()
+    ]
+    if section_evidence_id and section_evidence_id in grounded_record_evidence_ids:
+        return True
+    return _retrieved_section_matches_evidence(section=section, evidence_item=grounded_item)
+
+
+def _resolve_stage_debug_accepted_evidence_items(
+    *,
+    unit: EvaluationUnit,
+    stage_key: str,
+) -> list[dict[str, Any]]:
+    stage_judgment = _resolve_unit_stage_judgment(unit=unit, stage_key=stage_key)
+    if stage_judgment is None:
+        return []
+    if stage_judgment.supporting_record_evidence_items:
+        return [
+            {
+                **dict(item),
+                "stage_key": str(item.get("stage_key") or "").strip() or stage_key,
+                "source_stage": str(item.get("source_stage") or "").strip() or stage_key,
+            }
+            for item in stage_judgment.supporting_record_evidence_items
+        ]
+
+    accepted_record_id_set = {
+        evidence_id
+        for evidence_id in stage_judgment.supporting_record_evidence_ids
+        if evidence_id
+    }
+    return [
+        {
+            "evidence_id": node.evidence_id,
+            "section_id": node.section_id,
+            "subsection_id": node.subsection_id,
+            "section_label": node.section_label,
+            "heading_title": node.heading_title,
+            "source_document": node.source_document,
+            "text": node.text,
+            "stage_key": stage_key,
+            "source_stage": stage_key,
+        }
+        for node in unit.record_evidence_chunks
+        if node.evidence_id and node.evidence_id in accepted_record_id_set
+    ]
+
+
+def _resolve_stage_grounded_evidence_annotations(
+    *,
+    unit: EvaluationUnit,
+    stage_key: str,
+) -> list[dict[str, Any]]:
+    stage_judgment = _resolve_unit_stage_judgment(unit=unit, stage_key=stage_key)
+    if stage_judgment is None:
+        return []
+
+    grounded_items = _resolve_stage_grounded_record_evidence_items(
+        deliverable_id=unit.deliverable.deliverable_id,
+        stage_judgment=stage_judgment,
+        record_nodes=unit.record_evidence_chunks,
+    )
+    annotations: list[dict[str, Any]] = []
+    for item in grounded_items:
+        explicit_evidence_id = str(item.get("evidence_id") or "").strip()
+        grounded_record_evidence_ids = (
+            [explicit_evidence_id]
+            if explicit_evidence_id
+            else _match_record_item_to_nodes(item, unit.record_evidence_chunks)
+        )
+        quote_text = str(item.get("text") or "").strip()
+        element_ids = [
+            element.element_id
+            for element in unit.requirement_elements
+            if element.required and quote_text and _does_grounded_quote_support_element(
+                element=element,
+                quote_text=quote_text,
+            )
+        ]
+        annotations.append(
+            {
+                **dict(item),
+                "evidence_id": str(item.get("evidence_id") or "").strip() or (
+                    grounded_record_evidence_ids[0] if grounded_record_evidence_ids else ""
+                ),
+                "stage_key": str(item.get("stage_key") or "").strip() or stage_key,
+                "source_stage": str(item.get("source_stage") or "").strip() or stage_key,
+                "grounded_record_evidence_ids": grounded_record_evidence_ids,
+                "element_ids": element_ids,
+                "grounding_status": "grounded",
+            }
+        )
+    return annotations
+
+
+def _resolve_unit_stage_judgment(*, unit: EvaluationUnit, stage_key: str) -> Any | None:
+    if stage_key == "stage_2_record_retrieval":
+        return unit.stage_2_answer
+    if stage_key == "stage_3_reference_retrieval":
+        return unit.stage_3_answer
+    return None
+
+
+def _retrieved_section_matches_evidence(*, section: dict[str, Any], evidence_item: Any) -> bool:
+    section_text = _normalize_debug_match_text(
+        " ".join(
+            str(part or "")
+            for part in (
+                section.get("text"),
+                section.get("table_markdown"),
+                section.get("heading_title"),
+                section.get("section_label"),
+            )
+        )
+    )
+    evidence_text = _normalize_debug_match_text(_payload_value(evidence_item, "text", ""))
+    if not section_text or not evidence_text:
+        return False
+    return evidence_text in section_text or section_text in evidence_text
+
+
+def _normalize_debug_match_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _build_text_preview(*, text: Any, table_markdown: Any) -> str:
+    preview_source = str(text or table_markdown or "").strip()
+    preview = " ".join(preview_source.split())
+    if len(preview) <= 220:
+        return preview
+    return preview[:217] + "..."
 
 
 def _build_stage_output(

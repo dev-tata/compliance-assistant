@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import re
 from typing import Any, Iterable, Sequence
 from .config import evaluation_v3_config
@@ -8,9 +9,14 @@ from .schemas import (
     ComplianceLabel,
     ContradictionType,
     DeliverableNode,
+    EvidencePipelineCounters,
+    QuoteElementMappingDebug,
     EVALUATION_V3_ANALYSIS_METRICS,
     EvaluationV3Result,
     EvaluationV3ResultRow,
+    RequirementElement,
+    RequirementElementSupport,
+    StageElementAssessment,
     EvaluationUnit,
     EvaluationV3Metrics,
     EvidenceNode,
@@ -135,6 +141,10 @@ def build_evaluation_unit(
         explicit_value=required_evidence_count,
     )
     requirement_type = _classify_requirement_type(deliverable.requirement_text)
+    requirement_elements = _build_placeholder_requirement_elements(
+        deliverable=deliverable,
+        requirement_type=requirement_type,
+    )
     print(
         "[evaluation_v3_grounding_debug]",
         {
@@ -167,8 +177,74 @@ def build_evaluation_unit(
         record_nodes=record_nodes,
     )
     grounded_record_evidence_count = _count_grounded_record_evidence(
+        deliverable_id=deliverable.deliverable_id,
         stage_judgments=(stage_1, stage_2, stage_3),
         record_nodes=record_nodes,
+    )
+    stage_1_grounded_items = _resolve_stage_grounded_record_evidence_items(
+        deliverable_id=deliverable.deliverable_id,
+        stage_judgment=stage_1,
+        record_nodes=record_nodes,
+    )
+    stage_2_grounded_items = _resolve_stage_grounded_record_evidence_items(
+        deliverable_id=deliverable.deliverable_id,
+        stage_judgment=stage_2,
+        record_nodes=record_nodes,
+    )
+    stage_3_grounded_items = _resolve_stage_grounded_record_evidence_items(
+        deliverable_id=deliverable.deliverable_id,
+        stage_judgment=stage_3,
+        record_nodes=record_nodes,
+    )
+    final_grounded_items = _resolve_grounded_record_evidence_items(
+        deliverable_id=deliverable.deliverable_id,
+        stage_judgments=(stage_1, stage_2, stage_3),
+        record_nodes=record_nodes,
+    )
+    stage_1_grounded_evidence_count = _resolve_stage_grounded_evidence_count(
+        deliverable_id=deliverable.deliverable_id,
+        stage_judgment=stage_1,
+        record_nodes=record_nodes,
+    )
+    stage_2_grounded_evidence_count = _resolve_stage_grounded_evidence_count(
+        deliverable_id=deliverable.deliverable_id,
+        stage_judgment=stage_2,
+        record_nodes=record_nodes,
+    )
+    stage_3_grounded_evidence_count = _resolve_stage_grounded_evidence_count(
+        deliverable_id=deliverable.deliverable_id,
+        stage_judgment=stage_3,
+        record_nodes=record_nodes,
+    )
+    stage_1_element_assessment = _build_placeholder_stage_element_assessment(
+        stage_key="stage_1",
+        requirement_elements=requirement_elements,
+        grounded_record_evidence_items=stage_1_grounded_items,
+        grounded_record_nodes=_resolve_stage_grounded_record_nodes(
+            stage_judgment=stage_1,
+            record_nodes=record_nodes,
+        ),
+        conflict_flag=stage_1.conflict_flag,
+    )
+    stage_2_element_assessment = _build_placeholder_stage_element_assessment(
+        stage_key="stage_2",
+        requirement_elements=requirement_elements,
+        grounded_record_evidence_items=stage_2_grounded_items,
+        grounded_record_nodes=_resolve_stage_grounded_record_nodes(
+            stage_judgment=stage_2,
+            record_nodes=record_nodes,
+        ),
+        conflict_flag=stage_2.conflict_flag,
+    )
+    stage_3_element_assessment = _build_placeholder_stage_element_assessment(
+        stage_key="stage_3",
+        requirement_elements=requirement_elements,
+        grounded_record_evidence_items=stage_3_grounded_items,
+        grounded_record_nodes=_resolve_stage_grounded_record_nodes(
+            stage_judgment=stage_3,
+            record_nodes=record_nodes,
+        ),
+        conflict_flag=stage_3.conflict_flag,
     )
     _log_grounding_selection_debug(
         deliverable_id=deliverable.deliverable_id,
@@ -190,6 +266,13 @@ def build_evaluation_unit(
     conflict_detected = _detect_conflict(
         stage_judgments=(stage_1, stage_2, stage_3),
         verifier_input=verifier_input,
+    )
+    final_element_assessment = _build_placeholder_stage_element_assessment(
+        stage_key="final",
+        requirement_elements=requirement_elements,
+        grounded_record_evidence_items=final_grounded_items,
+        grounded_record_nodes=grounded_record_nodes,
+        conflict_flag=conflict_detected,
     )
     # Final label ordering is fixed:
     # 1. evidence_status
@@ -218,6 +301,11 @@ def build_evaluation_unit(
             stage_1_answer=stage_1,
             stage_2_answer=stage_2,
             stage_3_answer=stage_3,
+            requirement_elements=requirement_elements,
+            stage_1_element_assessment=stage_1_element_assessment,
+            stage_2_element_assessment=stage_2_element_assessment,
+            stage_3_element_assessment=stage_3_element_assessment,
+            final_element_assessment=final_element_assessment,
             final_label=None,
             final_rationale=final_rationale,
             mini_kg_links=None,
@@ -233,6 +321,7 @@ def build_evaluation_unit(
     evidence_score = _compute_evidence_score(evidence_status=evidence_status)
 
     metrics = _build_metrics(
+        deliverable_id=deliverable.deliverable_id,
         evidence_status=evidence_status,
         final_label=final_label,
         required_evidence_count=resolved_required_evidence_count,
@@ -262,6 +351,11 @@ def build_evaluation_unit(
         stage_1_answer=stage_1,
         stage_2_answer=stage_2,
         stage_3_answer=stage_3,
+        requirement_elements=requirement_elements,
+        stage_1_element_assessment=stage_1_element_assessment,
+        stage_2_element_assessment=stage_2_element_assessment,
+        stage_3_element_assessment=stage_3_element_assessment,
+        final_element_assessment=final_element_assessment,
         final_label=final_label,
         final_rationale=final_rationale,
         mini_kg_links=mini_kg_links,
@@ -291,6 +385,960 @@ def derive_deliverable_requirement_metadata(
     }
 
 
+def _build_placeholder_requirement_elements(
+    *,
+    deliverable: DeliverableNode,
+    requirement_type: RequirementType,
+) -> list[RequirementElement]:
+    requirement_text = " ".join(str(deliverable.requirement_text or "").split()).strip()
+    element_texts = _decompose_requirement_text(
+        requirement_text=requirement_text,
+        requirement_type=requirement_type,
+    )
+    return [
+        RequirementElement(
+            element_id=f"{deliverable.deliverable_id}:element:{index}",
+            element_text=element_text,
+            element_type=requirement_type,
+            required=True,
+        )
+        for index, element_text in enumerate(element_texts, start=1)
+    ]
+
+
+def _decompose_requirement_text(
+    *,
+    requirement_text: str,
+    requirement_type: RequirementType,
+) -> list[str]:
+    text = " ".join(str(requirement_text or "").split()).strip()
+    if not text:
+        return [""]
+
+    if requirement_type in {"single_field", "generic"}:
+        clauses = _split_requirement_clauses(text)
+        return clauses[:3] if clauses else [text]
+
+    if requirement_type == "relationship":
+        concept_elements = _build_relationship_elements(text)
+        return concept_elements[:3] if concept_elements else [text]
+
+    if requirement_type == "list_or_table":
+        return [
+            f"Presence of the required list/table structure: {text}",
+            f"Required listed content is included in that list/table: {text}",
+        ]
+
+    if requirement_type == "per_function":
+        attribute_label = _infer_per_function_attribute_label(text)
+        return [
+            f"Relevant functions/categories are explicitly identified: {text}",
+            f"The required {attribute_label} is documented for each identified function/category: {text}",
+        ]
+
+    if requirement_type == "control_measure":
+        return [
+            f"Required control measure is present or specified: {text}",
+            f"Implementation, effect, or risk-reduction evidence is documented for that control measure: {text}",
+        ]
+
+    if requirement_type == "benefit_risk_rationale":
+        return [
+            f"Benefit-risk trigger/context is stated: {text}",
+            f"Benefit-risk rationale, details, or consequences are documented: {text}",
+        ]
+
+    if requirement_type == "residual_risk_acceptability":
+        return [
+            f"Residual risk statement is documented: {text}",
+            f"Residual risk acceptability conclusion is documented: {text}",
+        ]
+
+    if requirement_type == "conditional":
+        condition, outcome = _split_conditional_requirement(text)
+        if condition and outcome:
+            return [
+                f"Condition or trigger is defined: {condition}",
+                f"Required action or outcome is documented: {outcome}",
+            ]
+        return [
+            f"Condition or trigger is defined: {text}",
+            f"Required action or outcome is documented: {text}",
+        ]
+
+    return [text]
+
+
+def _split_requirement_clauses(text: str) -> list[str]:
+    normalized = " ".join(text.split()).strip()
+    if not normalized:
+        return []
+
+    explicit_parts = [
+        part.strip(" ,.;:")
+        for part in re.split(r"\s*;\s*|\s+\b(?:as well as|together with)\b\s+", normalized, flags=re.IGNORECASE)
+        if part.strip(" ,.;:")
+    ]
+    if len(explicit_parts) > 1:
+        return explicit_parts
+
+    lowered = normalized.lower()
+    if any(marker in lowered for marker in (" and ", " including ", " include ", " includes ")):
+        parts = [
+            part.strip(" ,.;:")
+            for part in re.split(r"\s+\b(?:and|including|include|includes)\b\s+", normalized, maxsplit=2, flags=re.IGNORECASE)
+            if part.strip(" ,.;:")
+        ]
+        if 1 < len(parts) <= 3:
+            return parts
+
+    return [normalized]
+
+
+def _build_relationship_elements(text: str) -> list[str]:
+    normalized = " ".join(text.split()).strip()
+    concept_parts = _split_relationship_concepts(normalized)
+    elements: list[str] = []
+    for concept in concept_parts[:2]:
+        elements.append(f"Concept is explicitly identified: {concept}")
+    elements.append(f"Required relationship between the identified concepts is documented: {normalized}")
+    return _dedupe(elements)[:3]
+
+
+def _split_relationship_concepts(text: str) -> list[str]:
+    patterns = (
+        r"\bbetween\s+(.+?)\s+and\s+(.+?)(?:[.,;:]|$)",
+        r"\bfrom\s+(.+?)\s+and\s+(.+?)(?:[.,;:]|$)",
+        r"\bof\s+(.+?)\s+and\s+(.+?)(?:[.,;:]|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return [match.group(1).strip(" ,.;:"), match.group(2).strip(" ,.;:")]
+
+    clauses = _split_requirement_clauses(text)
+    if len(clauses) >= 2:
+        return clauses[:2]
+    return [text]
+
+
+def _split_conditional_requirement(text: str) -> tuple[str, str]:
+    normalized = " ".join(text.split()).strip()
+    patterns = (
+        r"^(in cases where .+?),(?:\s*)(.+)$",
+        r"^(if .+?),(?:\s*)(.+)$",
+        r"^(when .+?),(?:\s*)(.+)$",
+        r"^(where .+?),(?:\s*)(.+)$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, normalized, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip(" ,.;:"), match.group(2).strip(" ,.;:")
+    return "", ""
+
+
+def _build_placeholder_stage_element_assessment(
+    *,
+    stage_key: str,
+    requirement_elements: Sequence[RequirementElement],
+    grounded_record_evidence_items: Sequence[dict[str, str]],
+    grounded_record_nodes: Sequence[EvidenceNode],
+    conflict_flag: bool,
+) -> StageElementAssessment:
+    required_elements = [element for element in requirement_elements if element.required]
+    elements: list[RequirementElementSupport] = []
+    quote_mapping_debug = _build_quote_element_mapping_debug(
+        requirement_elements=required_elements,
+        grounded_record_evidence_items=grounded_record_evidence_items,
+    )
+    for element in requirement_elements:
+        mapped_items = _map_grounded_quotes_to_requirement_element(
+            element=element,
+            grounded_record_evidence_items=grounded_record_evidence_items,
+        ) if element.required else []
+        conflict_details = _detect_requirement_element_conflicts(
+            element=element,
+            requirement_elements=requirement_elements,
+            grounded_record_evidence_items=grounded_record_evidence_items,
+            grounded_record_nodes=grounded_record_nodes,
+        ) if element.required else None
+        supporting_quotes, supporting_ids = _extract_quote_evidence_links(mapped_items)
+        conflicting_quotes, conflicting_ids = _extract_quote_evidence_links((conflict_details or {}).get("items", []))
+        has_detected_conflict = bool(conflicting_ids or conflicting_quotes)
+        if conflict_flag or has_detected_conflict:
+            element_status = "contradicted"
+        elif supporting_quotes:
+            element_status = "supported"
+        elif grounded_record_evidence_items:
+            element_status = "weak_match"
+        else:
+            element_status = "missing"
+        elements.append(
+            RequirementElementSupport(
+                element_id=element.element_id,
+                element_text=element.element_text,
+                element_type=element.element_type,
+                required=element.required,
+                supporting_evidence_ids=supporting_ids,
+                supporting_quotes=supporting_quotes,
+                element_status=element_status if element.required else "missing",
+                has_conflict=conflict_flag or has_detected_conflict,
+                conflict_types=[(conflict_details or {}).get("conflict_type")] if (conflict_details or {}).get("conflict_type") else [],
+                conflicting_evidence_ids=conflicting_ids,
+                conflicting_quotes=conflicting_quotes,
+                conflict_reasons=[(conflict_details or {}).get("conflict_reason")] if (conflict_details or {}).get("conflict_reason") else [],
+            )
+        )
+    supported_required_elements = sum(
+        1
+        for element_support, element in zip(elements, requirement_elements, strict=False)
+        if element.required and element_support.element_status == "supported"
+    )
+    total_required_elements = len(required_elements)
+    conflict_types = _dedupe(
+        [
+            str(ct or "").strip()
+            for element in elements
+            if element.conflict_types
+            for ct in element.conflict_types
+        ]
+    )
+    conflict_count = sum(1 for element in elements if bool(element.has_conflict))
+    conflicting_element_ids = _dedupe(
+        [
+            str(element.element_id or "").strip()
+            for element in elements
+            if bool(element.has_conflict) and str(element.element_id or "").strip()
+        ]
+    )
+    conflicting_evidence_ids = _dedupe(
+        [
+            evidence_id
+            for element in elements
+            for evidence_id in element.conflicting_evidence_ids
+            if str(evidence_id or "").strip()
+        ]
+    )
+    conflicting_quotes = _dedupe(
+        [
+            quote
+            for element in elements
+            for quote in element.conflicting_quotes
+            if str(quote or "").strip()
+        ]
+    )
+    conflict_reason = next(
+        (
+            str(element.conflict_reasons[0] if element.conflict_reasons else "").strip()
+            for element in elements
+            if bool(element.has_conflict) and element.conflict_reasons
+        ),
+        None,
+    )
+    return StageElementAssessment(
+        stage_key=stage_key,
+        supported_required_elements=supported_required_elements,
+        total_required_elements=total_required_elements,
+        element_coverage_ratio=(
+            round(supported_required_elements / total_required_elements, 4)
+            if total_required_elements > 0 else 0.0
+        ),
+        elements=elements,
+        quote_mapping_debug=quote_mapping_debug,
+        conflict_count=conflict_count,
+        has_conflict=bool(conflict_count or conflict_flag),
+        conflict_type=conflict_types[0] if conflict_types else None,
+        conflict_types=conflict_types,
+        conflicting_element_ids=conflicting_element_ids,
+        conflicting_evidence_ids=conflicting_evidence_ids,
+        conflicting_quotes=conflicting_quotes,
+        conflict_reason=conflict_reason,
+    )
+
+
+def _detect_requirement_element_conflicts(
+    *,
+    element: RequirementElement,
+    requirement_elements: Sequence[RequirementElement],
+    grounded_record_evidence_items: Sequence[dict[str, str]],
+    grounded_record_nodes: Sequence[EvidenceNode],
+) -> dict[str, Any] | None:
+    element_type = str(element.element_type or "").strip()
+    if not element.required:
+        return None
+    if element_type == "relationship":
+        return _detect_relationship_element_conflict(
+            element=element,
+            grounded_record_evidence_items=grounded_record_evidence_items,
+            grounded_record_nodes=grounded_record_nodes,
+        )
+    if element_type == "residual_risk_acceptability":
+        return _detect_residual_risk_element_conflict(
+            element=element,
+            grounded_record_evidence_items=grounded_record_evidence_items,
+        )
+    if element_type == "benefit_risk_rationale":
+        return _detect_benefit_risk_element_conflict(
+            grounded_record_evidence_items=grounded_record_evidence_items,
+        )
+    if element_type == "per_function":
+        return _detect_per_function_element_conflict(
+            element=element,
+            grounded_record_evidence_items=grounded_record_evidence_items,
+            grounded_record_nodes=grounded_record_nodes,
+        )
+    if element_type == "control_measure":
+        return _detect_control_measure_element_conflict(
+            grounded_record_evidence_items=grounded_record_evidence_items,
+        )
+    return None
+
+
+def _detect_relationship_element_conflict(
+    *,
+    element: RequirementElement,
+    grounded_record_evidence_items: Sequence[dict[str, str]],
+    grounded_record_nodes: Sequence[EvidenceNode],
+) -> dict[str, Any] | None:
+    normalized_element = _normalized_match_key(element.element_text)
+    if "required relationship between" not in normalized_element:
+        return None
+    context_conflict = _detect_synthetic_criticality_summary_mismatch(
+        grounded_record_evidence_items=grounded_record_evidence_items,
+        grounded_record_nodes=grounded_record_nodes,
+    )
+    if context_conflict is not None:
+        return context_conflict
+    relevant_items = [
+        item
+        for item in grounded_record_evidence_items
+        if _relationship_quote_has_risk_components(str(item.get("text") or ""))
+    ]
+    if not relevant_items:
+        return None
+    combined_text = " ".join(str(item.get("text") or "") for item in relevant_items)
+    criticality = _extract_named_level(combined_text, "criticality")
+    complexity = _extract_named_level(combined_text, "complexity")
+    overall = _extract_named_level(combined_text, "overall")
+    if criticality == "high" and complexity == "high" and overall == "low":
+        return {
+            "conflict_type": "relationship_value_mismatch",
+            "conflict_reason": "overall risk level low conflicts with criticality high and complexity high",
+            "items": relevant_items,
+        }
+    return None
+
+
+def _detect_residual_risk_element_conflict(
+    *,
+    element: RequirementElement,
+    grounded_record_evidence_items: Sequence[dict[str, str]],
+) -> dict[str, Any] | None:
+    normalized_element = _normalized_match_key(element.element_text)
+    if "acceptability" not in normalized_element and "acceptable" not in normalized_element:
+        return None
+    conflicting_items = [
+        item
+        for item in grounded_record_evidence_items
+        if _contains_residual_risk_negation(str(item.get("text") or ""))
+    ]
+    if not conflicting_items:
+        return None
+    return {
+        "conflict_type": "residual_risk_unacceptable",
+        "conflict_reason": "explicit residual risk unacceptable language",
+        "items": conflicting_items,
+    }
+
+
+def _detect_benefit_risk_element_conflict(
+    *,
+    grounded_record_evidence_items: Sequence[dict[str, str]],
+) -> dict[str, Any] | None:
+    conflicting_items = [
+        item
+        for item in grounded_record_evidence_items
+        if _contains_benefit_risk_explicit_absence(str(item.get("text") or ""))
+    ]
+    if not conflicting_items:
+        return None
+    return {
+        "conflict_type": "benefit_risk_not_performed",
+        "conflict_reason": "quote explicitly states no benefit-risk rationale or assessment was performed",
+        "items": conflicting_items,
+    }
+
+
+def _detect_per_function_element_conflict(
+    *,
+    element: RequirementElement,
+    grounded_record_evidence_items: Sequence[dict[str, str]],
+    grounded_record_nodes: Sequence[EvidenceNode],
+) -> dict[str, Any] | None:
+    context_conflict = _detect_synthetic_criticality_summary_mismatch(
+        grounded_record_evidence_items=grounded_record_evidence_items,
+        grounded_record_nodes=grounded_record_nodes,
+    )
+    if context_conflict is not None and _infer_per_function_attribute_label(element.element_text) == "criticality":
+        return {
+            **context_conflict,
+            "conflict_type": "per_function_attribute_mismatch",
+        }
+    attribute_label = _infer_per_function_attribute_label(element.element_text)
+    conflicting_items = [
+        item
+        for item in grounded_record_evidence_items
+        if _quote_has_concrete_function_reference(str(item.get("text") or ""))
+        and _contains_per_function_explicit_conflict(
+            quote_text=str(item.get("text") or ""),
+            attribute_label=attribute_label,
+        )
+    ]
+    if not conflicting_items:
+        return None
+    return {
+        "conflict_type": "per_function_incompatible_attribute",
+        "conflict_reason": f"quote explicitly negates or rejects required per-function {attribute_label}",
+        "items": conflicting_items,
+    }
+
+
+def _detect_control_measure_element_conflict(
+    *,
+    grounded_record_evidence_items: Sequence[dict[str, str]],
+) -> dict[str, Any] | None:
+    conflicting_items = [
+        item
+        for item in grounded_record_evidence_items
+        if _contains_control_measure_explicit_absence(str(item.get("text") or ""))
+    ]
+    if not conflicting_items:
+        return None
+    return {
+        "conflict_type": "control_not_implemented",
+        "conflict_reason": "quote explicitly states controls were absent or not implemented",
+        "items": conflicting_items,
+    }
+
+
+def _map_grounded_quotes_to_requirement_element(
+    *,
+    element: RequirementElement,
+    grounded_record_evidence_items: Sequence[dict[str, str]],
+) -> list[dict[str, str]]:
+    matched_items: list[dict[str, str]] = []
+    for item in grounded_record_evidence_items:
+        quote_text = str(item.get("text") or "").strip()
+        if not quote_text:
+            continue
+        if _does_grounded_quote_support_element(element=element, quote_text=quote_text):
+            matched_items.append(item)
+    return matched_items
+
+
+def _extract_quote_evidence_links(items: Sequence[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    linked_pairs: list[tuple[str, str]] = []
+    seen_quotes: set[str] = set()
+    for item in items:
+        quote_text = str(item.get("text") or "").strip()
+        if not quote_text or quote_text in seen_quotes:
+            continue
+        seen_quotes.add(quote_text)
+        linked_pairs.append((quote_text, str(item.get("evidence_id") or "").strip()))
+    quotes = [quote_text for quote_text, _ in linked_pairs]
+    evidence_ids = [evidence_id for _, evidence_id in linked_pairs if evidence_id]
+    return quotes, evidence_ids
+
+
+def _does_grounded_quote_support_element(
+    *,
+    element: RequirementElement,
+    quote_text: str,
+) -> bool:
+    if str(element.element_type or "").strip() == "per_function":
+        return _does_per_function_quote_support_element(
+            element_text=element.element_text,
+            quote_text=quote_text,
+        )
+
+    normalized_element = _normalized_match_key(element.element_text)
+    normalized_quote = _normalized_match_key(quote_text)
+    if not normalized_element or not normalized_quote:
+        return False
+    if _is_text_match(normalized_element, normalized_quote):
+        return True
+
+    overlap_score = _token_overlap_match_score(element.element_text, quote_text)
+    if overlap_score > 0:
+        return True
+
+    element_phrases = _extract_key_phrases(element.element_text)
+    if element_phrases and any(phrase in normalized_quote for phrase in element_phrases):
+        return True
+
+    keyword_hits = _requirement_type_keyword_hits(
+        element_type=element.element_type,
+        element_text=element.element_text,
+        quote_text=quote_text,
+    )
+    return keyword_hits > 0
+
+
+def _does_per_function_quote_support_element(
+    *,
+    element_text: str,
+    quote_text: str,
+) -> bool:
+    normalized_element = _normalized_match_key(element_text)
+    normalized_quote = _normalized_match_key(quote_text)
+    if not normalized_element or not normalized_quote:
+        return False
+
+    attribute_label = _infer_per_function_attribute_label(element_text)
+    rows = _extract_table_rows(quote_text)
+    if rows:
+        if "identified" in normalized_element or "functions/categories are explicitly identified" in normalized_element:
+            return any(
+                _row_has_function_identifier(cells)
+                and not _is_table_header_cells(cells)
+                and not _is_table_separator_cells(cells)
+                for cells in rows
+            )
+
+        if attribute_label == "criticality":
+            return any(
+                _row_supports_per_function_attribute(
+                    cells=cells,
+                    column_index=1,
+                    attribute_keywords=("criticality",),
+                )
+                for cells in rows
+            )
+        if attribute_label == "complexity":
+            return any(
+                _row_supports_per_function_attribute(
+                    cells=cells,
+                    column_index=2,
+                    attribute_keywords=("complexity",),
+                )
+                for cells in rows
+            )
+        if attribute_label == "risk class":
+            return any(
+                _row_supports_per_function_attribute(
+                    cells=cells,
+                    column_index=3,
+                    attribute_keywords=("risk class", "risk classification", "risk"),
+                )
+                for cells in rows
+            )
+
+        return any(
+            _row_has_function_identifier(cells)
+            and not _is_table_header_cells(cells)
+            and not _is_table_separator_cells(cells)
+            and _contains_classification_value(_normalized_match_key(" | ".join(cells)))
+            for cells in rows
+        )
+
+    return _does_narrative_quote_support_per_function_element(
+        element_text=element_text,
+        quote_text=quote_text,
+    )
+
+
+def _does_narrative_quote_support_per_function_element(
+    *,
+    element_text: str,
+    quote_text: str,
+) -> bool:
+    normalized_element = _normalized_match_key(element_text)
+    normalized_quote = _normalized_match_key(quote_text)
+    if not normalized_element or not normalized_quote:
+        return False
+    if _is_generic_per_function_narrative(quote_text):
+        return False
+    if not _quote_has_concrete_function_reference(quote_text):
+        return False
+
+    attribute_label = _infer_per_function_attribute_label(element_text)
+    if "identified" in normalized_element or "functions/categories are explicitly identified" in normalized_element:
+        return True
+    if attribute_label == "criticality":
+        return _quote_supports_narrative_criticality(quote_text)
+    if attribute_label == "complexity":
+        return _quote_supports_narrative_complexity(quote_text)
+    if attribute_label == "risk class":
+        return _quote_supports_narrative_risk_class(quote_text)
+    return _contains_classification_value(normalized_quote)
+
+
+def _infer_per_function_attribute_label(text: str) -> str:
+    normalized = _normalized_match_key(text)
+    if "criticality" in normalized:
+        return "criticality"
+    if "complexity" in normalized:
+        return "complexity"
+    if "risk class" in normalized or "risk classification" in normalized:
+        return "risk class"
+    return "attribute"
+
+
+def _extract_table_row_cells(text: str) -> list[str]:
+    normalized = " ".join(str(text or "").split()).strip()
+    normalized = re.sub(r"^(table row:|table:)\s*", "", normalized, flags=re.IGNORECASE)
+    normalized = normalized.strip("“”\"'")
+    if "|" not in normalized:
+        return []
+    return [
+        cell.strip()
+        for cell in normalized.split("|")
+        if cell.strip()
+    ]
+
+
+def _extract_table_rows(text: str) -> list[list[str]]:
+    cells = _extract_table_row_cells(text)
+    if not cells:
+        return []
+    row_width = _infer_table_row_width(cells)
+    if row_width <= 0 or len(cells) <= row_width:
+        return [cells]
+    return [
+        cells[index:index + row_width]
+        for index in range(0, len(cells), row_width)
+        if cells[index:index + row_width]
+    ]
+
+
+def _infer_table_row_width(cells: Sequence[str]) -> int:
+    normalized_cells = [_normalized_match_key(cell).strip("“”\"'") for cell in cells]
+    header_sequence = ("function", "criticality", "complexity", "risk class")
+    if len(normalized_cells) >= 4 and tuple(normalized_cells[:4]) == header_sequence:
+        return 4
+    if len(normalized_cells) >= 4:
+        return 4
+    return len(normalized_cells)
+
+
+def _is_table_header_cells(cells: Sequence[str]) -> bool:
+    if not cells:
+        return False
+    normalized_cells = [_normalized_match_key(cell).strip("“”\"'") for cell in cells]
+    header_markers = {"function", "criticality", "complexity", "risk class", "risk classification", "risk"}
+    return all(cell in header_markers for cell in normalized_cells)
+
+
+def _is_table_separator_cells(cells: Sequence[str]) -> bool:
+    if not cells:
+        return False
+    return all(re.fullmatch(r"[:\-]+", _normalized_match_key(cell).strip("“”\"'")) for cell in cells)
+
+
+def _row_has_function_identifier(cells: Sequence[str]) -> bool:
+    if len(cells) < 2:
+        return False
+    first_cell = _normalized_match_key(cells[0]).strip("“”\"'")
+    if not first_cell:
+        return False
+    if first_cell in {"function", "functions"}:
+        return False
+    return any(char.isalpha() for char in first_cell)
+
+
+def _row_supports_per_function_attribute(
+    *,
+    cells: Sequence[str],
+    column_index: int,
+    attribute_keywords: Sequence[str],
+) -> bool:
+    if (
+        not cells
+        or _is_table_header_cells(cells)
+        or _is_table_separator_cells(cells)
+        or not _row_has_function_identifier(cells)
+    ):
+        return False
+    if len(cells) > column_index and _contains_classification_value(_normalized_match_key(cells[column_index])):
+        return True
+    normalized_joined = _normalized_match_key(" | ".join(cells))
+    return any(keyword in normalized_joined for keyword in attribute_keywords) and _contains_classification_value(normalized_joined)
+
+
+def _contains_classification_value(text: str) -> bool:
+    normalized = _normalized_match_key(text)
+    if not normalized:
+        return False
+    return any(
+        re.search(rf"\b{re.escape(value)}\b", normalized)
+        for value in ("low", "medium", "high")
+    )
+
+
+def _extract_named_level(text: str, field_name: str) -> str:
+    normalized = _normalized_match_key(text)
+    if not normalized:
+        return ""
+    pattern_map = {
+        "criticality": r"system criticality level[:\s]+(low|medium|high)",
+        "complexity": r"system complexity level[:\s]+(low|medium|high)",
+        "overall": r"overall system risk level[:\s]+(low|medium|high)",
+    }
+    pattern = pattern_map.get(field_name)
+    if not pattern:
+        return ""
+    match = re.search(pattern, normalized)
+    return str(match.group(1) if match else "")
+
+
+def _relationship_quote_has_risk_components(text: str) -> bool:
+    normalized = _normalized_match_key(text)
+    return any(
+        marker in normalized
+        for marker in ("system criticality level", "system complexity level", "overall system risk level")
+    )
+
+
+def _contains_residual_risk_negation(text: str) -> bool:
+    normalized = _normalized_match_key(text)
+    if "residual risk" not in normalized:
+        return False
+    return any(
+        marker in normalized
+        for marker in ("not acceptable", "unacceptable", "not deemed acceptable")
+    )
+
+
+def _contains_benefit_risk_explicit_absence(text: str) -> bool:
+    normalized = _normalized_match_key(text)
+    markers = (
+        "no benefit-risk assessment",
+        "no benefit-risk rationale",
+        "benefit-risk rationale was not performed",
+        "benefit-risk assessment was not performed",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _contains_per_function_explicit_conflict(*, quote_text: str, attribute_label: str) -> bool:
+    normalized = _normalized_match_key(quote_text)
+    if not normalized or not _quote_has_concrete_function_reference(quote_text):
+        return False
+    if attribute_label == "criticality":
+        markers = (
+            "no criticality",
+            "criticality not documented",
+            "criticality not defined",
+            "criticality missing",
+        )
+    elif attribute_label == "complexity":
+        markers = (
+            "no complexity",
+            "complexity not documented",
+            "complexity not defined",
+            "complexity missing",
+            "likelihood not documented",
+        )
+    elif attribute_label == "risk class":
+        markers = (
+            "no risk class",
+            "risk class not documented",
+            "risk classification not documented",
+            "risk class missing",
+        )
+    else:
+        markers = ("not documented", "not defined", "missing")
+    return any(marker in normalized for marker in markers)
+
+
+def _contains_control_measure_explicit_absence(text: str) -> bool:
+    normalized = _normalized_match_key(text)
+    markers = (
+        "no risk controls implemented",
+        "controls not implemented",
+        "no control measures implemented",
+        "risk controls were not implemented",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _detect_synthetic_criticality_summary_mismatch(
+    *,
+    grounded_record_evidence_items: Sequence[dict[str, str]],
+    grounded_record_nodes: Sequence[EvidenceNode],
+) -> dict[str, Any] | None:
+    context_text = " ".join(
+        str(node.text or "").strip()
+        for node in grounded_record_nodes
+        if str(node.text or "").strip()
+    )
+    if not context_text:
+        return None
+    normalized_context = _normalized_match_key(context_text)
+    if "highest observed function criticality in this assessment is medium" not in normalized_context:
+        return None
+
+    high_row_quotes = [
+        str(item.get("text") or "").strip()
+        for item in grounded_record_evidence_items
+        if _quote_contains_high_criticality_function(str(item.get("text") or ""))
+    ]
+    if not high_row_quotes and "system criticality level: high" not in normalized_context:
+        return None
+
+    conflict_quotes = _dedupe(
+        [
+            "The highest observed function criticality in this assessment is Medium.",
+            *high_row_quotes,
+            *(
+                ["System Criticality Level: High"]
+                if "system criticality level: high" in normalized_context
+                else []
+            ),
+        ]
+    )
+    conflicting_evidence_ids = _dedupe(
+        [
+            str(node.evidence_id or "").strip()
+            for node in grounded_record_nodes
+            if str(node.evidence_id or "").strip()
+        ]
+    )
+    return {
+        "conflict_type": "risk_class_relationship_mismatch",
+        "conflict_reason": "summary criticality medium conflicts with grounded high criticality function or overall criticality high",
+        "items": [
+            {
+                "evidence_id": evidence_id,
+                "text": quote,
+            }
+            for evidence_id in (conflicting_evidence_ids or [""])
+            for quote in conflict_quotes
+        ],
+    }
+
+
+def _quote_contains_high_criticality_function(text: str) -> bool:
+    normalized = _normalized_match_key(text)
+    if not normalized:
+        return False
+    if "|" in text:
+        rows = _extract_table_rows(text)
+        return any(
+            _row_supports_per_function_attribute(
+                cells=cells,
+                column_index=1,
+                attribute_keywords=("criticality",),
+            ) and len(cells) > 1 and _normalized_match_key(cells[1]) == "high"
+            for cells in rows
+        )
+    return bool(
+        _quote_has_concrete_function_reference(text)
+        and (
+            " critical " in f" {normalized} "
+            or re.search(r"\bhigh\s+on\s+[a-z]", normalized)
+            or re.search(r"\bis high\b", normalized)
+        )
+    )
+
+
+def _quote_has_concrete_function_reference(quote_text: str) -> bool:
+    normalized = _normalized_match_key(quote_text)
+    if not normalized:
+        return False
+    patterns = (
+        r"\b[a-z][a-z0-9]*(?:\s+[a-z][a-z0-9]*){0,2}\s+function\b",
+        r"\b(?:high|medium|low)\s+on\s+[a-z][a-z0-9]*(?:\s+[a-z][a-z0-9]*){0,2}\b",
+        r"\b[a-z][a-z0-9]*(?:\s+[a-z][a-z0-9]*){0,2}\s+is\s+(?:critical|complex|high|medium|low)\b",
+        r"\b(?:merge|merging|clone|cloning|export|loading|backup|scheduling|report generation|workflow triggering|data export|job scheduling|configuration loading)\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in patterns)
+
+
+def _is_generic_per_function_narrative(quote_text: str) -> bool:
+    normalized = _normalized_match_key(quote_text)
+    if not normalized:
+        return False
+    generic_markers = (
+        "major functions have been assessed",
+        "functions have been assessed",
+        "according to their criticality",
+        "according to their complexity",
+        "risks posed by",
+    )
+    return any(marker in normalized for marker in generic_markers) and not _quote_has_concrete_function_reference(quote_text)
+
+
+def _quote_supports_narrative_criticality(quote_text: str) -> bool:
+    normalized = _normalized_match_key(quote_text)
+    if not normalized:
+        return False
+    if re.search(r"\b(?:critical|criticality)\b", normalized):
+        return True
+    return bool(
+        _contains_classification_value(normalized)
+        and re.search(r"\b(?:high|medium|low)\s+on\s+[a-z]", normalized)
+    )
+
+
+def _quote_supports_narrative_complexity(quote_text: str) -> bool:
+    normalized = _normalized_match_key(quote_text)
+    if not normalized:
+        return False
+    if re.search(r"\b(?:complexity|complex|likelihood)\b", normalized):
+        return True
+    return bool(
+        _contains_classification_value(normalized)
+        and re.search(r"\b(?:complexity|likelihood)\b", normalized)
+    )
+
+
+def _quote_supports_narrative_risk_class(quote_text: str) -> bool:
+    normalized = _normalized_match_key(quote_text)
+    if not normalized:
+        return False
+    return bool(
+        _contains_classification_value(normalized)
+        and re.search(r"\b(?:risk class|risk classification|risk level)\b", normalized)
+    )
+
+
+def _extract_key_phrases(text: str) -> list[str]:
+    normalized = _normalized_match_key(text)
+    if not normalized:
+        return []
+    phrases: list[str] = []
+    parts = re.split(r"[,:;()]", normalized)
+    for part in parts:
+        candidate = " ".join(part.split()).strip()
+        if len(candidate.split()) >= 2:
+            phrases.append(candidate)
+    return _dedupe(phrases)[:4]
+
+
+def _requirement_type_keyword_hits(
+    *,
+    element_type: str,
+    element_text: str,
+    quote_text: str,
+) -> int:
+    normalized_quote = _normalized_match_key(quote_text)
+    keyword_map: dict[str, list[str]] = {
+        "relationship": ["relationship", "between", "linked", "associated"],
+        "list_or_table": ["list", "table", "column", "row", "includes", "contains"],
+        "per_function": ["function", "functions", "criticality", "complexity", "classification", "risk"],
+        "control_measure": ["control", "measure", "mitigate", "reduction", "implemented", "reviewed"],
+        "benefit_risk_rationale": ["benefit", "risk", "rationale", "consequence", "justification"],
+        "residual_risk_acceptability": ["residual", "risk", "acceptable", "acceptability"],
+        "conditional": ["if", "when", "where", "in cases where"],
+    }
+    keywords = keyword_map.get(str(element_type or "").strip(), [])
+    text_tokens = set(_meaningful_tokens(element_text))
+    hits = sum(1 for keyword in keywords if keyword in normalized_quote)
+    hits += sum(1 for token in text_tokens if token and token in normalized_quote)
+    return hits
+
+
 def calculate_aggregate_metrics(units: Sequence[EvaluationUnit]) -> EvaluationV3Metrics:
     if not units:
         return EvaluationV3Metrics(
@@ -299,10 +1347,37 @@ def calculate_aggregate_metrics(units: Sequence[EvaluationUnit]) -> EvaluationV3
             not_satisfied_count=0,
             supported_count=0,
             missing_count=0,
-            conflicting_count=0,
+            requirements_with_conflict=0,
+            total_conflict_findings=0,
+            requirements_by_conflict_type={},
+            conflict_findings_by_type={},
             avg_grounded_evidence_count=0.0,
             avg_evidence_coverage_ratio=0.0,
         )
+
+    # Calculate conflict metrics
+    requirements_with_conflict = sum(
+        1
+        for unit in units
+        if unit.final_element_assessment is not None and bool(unit.final_element_assessment.has_conflict)
+    )
+    total_conflict_findings = sum(
+        int(unit.final_element_assessment.conflict_count or 0)
+        for unit in units
+        if unit.final_element_assessment is not None
+    )
+    requirements_by_conflict_type: dict[str, int] = {}
+    conflict_findings_by_type: dict[str, int] = {}
+    for unit in units:
+        if unit.final_element_assessment is None:
+            continue
+        assessment_requirement_counts, assessment_finding_counts = _summarize_assessment_conflict_types(
+            unit.final_element_assessment
+        )
+        for conflict_type, count in assessment_requirement_counts.items():
+            requirements_by_conflict_type[conflict_type] = requirements_by_conflict_type.get(conflict_type, 0) + count
+        for conflict_type, count in assessment_finding_counts.items():
+            conflict_findings_by_type[conflict_type] = conflict_findings_by_type.get(conflict_type, 0) + count
 
     return EvaluationV3Metrics(
         satisfied_count=sum(1 for unit in units if unit.final_label == "satisfied"),
@@ -310,7 +1385,10 @@ def calculate_aggregate_metrics(units: Sequence[EvaluationUnit]) -> EvaluationV3
         not_satisfied_count=sum(1 for unit in units if unit.final_label == "not_satisfied"),
         supported_count=sum(1 for unit in units if unit.evidence_status == "supported"),
         missing_count=sum(1 for unit in units if unit.evidence_status == "missing"),
-        conflicting_count=sum(1 for unit in units if unit.evidence_status == "conflicting"),
+        requirements_with_conflict=requirements_with_conflict,
+        total_conflict_findings=total_conflict_findings,
+        requirements_by_conflict_type=requirements_by_conflict_type,
+        conflict_findings_by_type=conflict_findings_by_type,
         avg_grounded_evidence_count=round(
             sum(_resolve_debug_grounded_evidence_count(unit) for unit in units) / len(units),
             4,
@@ -324,20 +1402,56 @@ def calculate_aggregate_metrics(units: Sequence[EvaluationUnit]) -> EvaluationV3
 
 def build_evaluation_v3_result_row(unit: EvaluationUnit) -> EvaluationV3ResultRow:
     stage_1_grounded_evidence_count = _resolve_stage_grounded_evidence_count(
+        deliverable_id=unit.deliverable.deliverable_id,
         stage_judgment=unit.stage_1_answer,
         record_nodes=unit.record_evidence_chunks,
     )
     stage_2_grounded_evidence_count = _resolve_stage_grounded_evidence_count(
+        deliverable_id=unit.deliverable.deliverable_id,
         stage_judgment=unit.stage_2_answer,
         record_nodes=unit.record_evidence_chunks,
     )
     stage_3_grounded_evidence_count = _resolve_stage_grounded_evidence_count(
+        deliverable_id=unit.deliverable.deliverable_id,
         stage_judgment=unit.stage_3_answer,
         record_nodes=unit.record_evidence_chunks,
     )
+    stage_1_evidence_pipeline = _build_stage_evidence_pipeline_counters(
+        deliverable_id=unit.deliverable.deliverable_id,
+        stage_key="stage_1",
+        stage_judgment=unit.stage_1_answer,
+        record_nodes=unit.record_evidence_chunks,
+        requirement_elements=unit.requirement_elements,
+        stage_element_assessment=unit.stage_1_element_assessment,
+    )
+    stage_2_evidence_pipeline = _build_stage_evidence_pipeline_counters(
+        deliverable_id=unit.deliverable.deliverable_id,
+        stage_key="stage_2",
+        stage_judgment=unit.stage_2_answer,
+        record_nodes=unit.record_evidence_chunks,
+        requirement_elements=unit.requirement_elements,
+        stage_element_assessment=unit.stage_2_element_assessment,
+    )
+    stage_3_evidence_pipeline = _build_stage_evidence_pipeline_counters(
+        deliverable_id=unit.deliverable.deliverable_id,
+        stage_key="stage_3",
+        stage_judgment=unit.stage_3_answer,
+        record_nodes=unit.record_evidence_chunks,
+        requirement_elements=unit.requirement_elements,
+        stage_element_assessment=unit.stage_3_element_assessment,
+    )
+    elements = unit.final_element_assessment.elements if unit.final_element_assessment else []
+    required_element_count = len([e for e in elements if e.required])
+    supported_element_count = len([e for e in elements if e.element_status == "supported"])
+    missing_element_count = len([e for e in elements if e.element_status == "missing"])
+    contradicted_element_count = len([e for e in elements if e.element_status == "contradicted"])
+    weak_match_element_count = len([e for e in elements if e.element_status == "weak_match"])
+    total_conflict_findings = sum(len(e.conflict_types) for e in elements)
+    conflicted_element_ids = [e.element_id for e in elements if e.has_conflict]
+
     return EvaluationV3ResultRow(
         deliverable_id=unit.deliverable.deliverable_id,
-        final_label=unit.final_label,
+        quote_label=unit.final_label,
         stage_1_label=unit.stage_1_answer.label,
         stage_2_label=unit.stage_2_answer.label,
         stage_3_label=unit.stage_3_answer.label,
@@ -359,6 +1473,9 @@ def build_evaluation_v3_result_row(unit: EvaluationUnit) -> EvaluationV3ResultRo
         stage_1_grounded_evidence_count=stage_1_grounded_evidence_count,
         stage_2_grounded_evidence_count=stage_2_grounded_evidence_count,
         stage_3_grounded_evidence_count=stage_3_grounded_evidence_count,
+        stage_1_evidence_pipeline=stage_1_evidence_pipeline,
+        stage_2_evidence_pipeline=stage_2_evidence_pipeline,
+        stage_3_evidence_pipeline=stage_3_evidence_pipeline,
         stage_1_evidence_coverage_ratio=_compute_evidence_coverage_ratio(
             grounded_evidence_count=stage_1_grounded_evidence_count,
             required_evidence_count=int(unit.required_evidence_count or 0),
@@ -375,9 +1492,37 @@ def build_evaluation_v3_result_row(unit: EvaluationUnit) -> EvaluationV3ResultRo
         grounded_evidence_count=_resolve_debug_grounded_evidence_count(unit),
         grounded_chunk_count=_resolve_debug_grounded_chunk_count(unit),
         required_evidence_count=unit.required_evidence_count,
+        required_element_count=required_element_count,
+        supported_element_count=supported_element_count,
+        missing_element_count=missing_element_count,
+        contradicted_element_count=contradicted_element_count,
+        weak_match_element_count=weak_match_element_count,
+        total_conflict_findings=total_conflict_findings,
+        conflicted_element_ids=conflicted_element_ids,
+        final_element_coverage_ratio=_resolve_element_coverage_ratio(unit.final_element_assessment),
+        stage_1_element_coverage_ratio=_resolve_element_coverage_ratio(unit.stage_1_element_assessment),
+        stage_2_element_coverage_ratio=_resolve_element_coverage_ratio(unit.stage_2_element_assessment),
+        stage_3_element_coverage_ratio=_resolve_element_coverage_ratio(unit.stage_3_element_assessment),
         evidence_coverage_ratio=_resolve_debug_evidence_coverage_ratio(unit),
+        requirement_elements=unit.requirement_elements,
+        stage_1_element_assessment=unit.stage_1_element_assessment,
+        stage_2_element_assessment=unit.stage_2_element_assessment,
+        stage_3_element_assessment=unit.stage_3_element_assessment,
+        final_element_assessment=unit.final_element_assessment,
+        conflict_count=_resolve_element_conflict_count(unit.final_element_assessment),
+        conflict_type=_resolve_element_conflict_type(unit.final_element_assessment),
+        conflict_types=_resolve_element_conflict_types(unit.final_element_assessment),
+        conflicting_element_ids=_resolve_element_conflicting_element_ids(unit.final_element_assessment),
+        conflicting_evidence_ids=_resolve_element_conflicting_evidence_ids(unit.final_element_assessment),
+        conflicting_quotes=_resolve_element_conflicting_quotes(unit.final_element_assessment),
+        conflict_reason=_resolve_element_conflict_reason(unit.final_element_assessment),
         has_conflict=_resolve_debug_has_conflict(unit),
         contradiction_type=unit.contradiction_type,
+        evidence_audit_status=_resolve_evidence_audit_status(
+            has_conflict=_resolve_debug_has_conflict(unit),
+            final_element_coverage_ratio=_resolve_element_coverage_ratio(unit.final_element_assessment),
+            grounded_evidence_count=_resolve_debug_grounded_evidence_count(unit),
+        ),
     )
 
 
@@ -398,19 +1543,46 @@ def build_evaluation_v3_summary(rows: Sequence[EvaluationV3ResultRow]) -> dict[s
             "not_satisfied": 0,
             "supported": 0,
             "missing": 0,
-            "conflicting": 0,
+            "requirements_with_conflict": 0,
+            "total_conflict_findings": 0,
+            "total_required_elements": 0,
+            "total_supported_elements": 0,
+            "total_missing_elements": 0,
+            "total_contradicted_elements": 0,
+            "total_weak_match_elements": 0,
+            "requirements_by_conflict_type": {},
+            "conflict_findings_by_type": {},
             "avg_grounded_evidence": 0.0,
             "avg_evidence_coverage": 0.0,
         }
 
+    requirements_by_conflict_type: dict[str, int] = {}
+    conflict_findings_by_type: dict[str, int] = {}
+    for row in rows:
+        assessment_requirement_counts, assessment_finding_counts = _summarize_assessment_conflict_types(
+            row.final_element_assessment
+        )
+        for conflict_type, count in assessment_requirement_counts.items():
+            requirements_by_conflict_type[conflict_type] = requirements_by_conflict_type.get(conflict_type, 0) + count
+        for conflict_type, count in assessment_finding_counts.items():
+            conflict_findings_by_type[conflict_type] = conflict_findings_by_type.get(conflict_type, 0) + count
+
     return {
         "total_units": total_units,
-        "satisfied": sum(1 for row in rows if row.final_label == "satisfied"),
-        "partial": sum(1 for row in rows if row.final_label == "partial"),
-        "not_satisfied": sum(1 for row in rows if row.final_label == "not_satisfied"),
+        "satisfied": sum(1 for row in rows if row.quote_label == "satisfied"),
+        "partial": sum(1 for row in rows if row.quote_label == "partial"),
+        "not_satisfied": sum(1 for row in rows if row.quote_label == "not_satisfied"),
         "supported": sum(1 for row in rows if row.evidence_status == "supported"),
         "missing": sum(1 for row in rows if row.evidence_status == "missing"),
-        "conflicting": sum(1 for row in rows if row.evidence_status == "conflicting"),
+        "requirements_with_conflict": sum(1 for row in rows if row.has_conflict),
+        "total_conflict_findings": sum(row.total_conflict_findings for row in rows),
+        "total_required_elements": sum(row.required_element_count for row in rows),
+        "total_supported_elements": sum(row.supported_element_count for row in rows),
+        "total_missing_elements": sum(row.missing_element_count for row in rows),
+        "total_contradicted_elements": sum(row.contradicted_element_count for row in rows),
+        "total_weak_match_elements": sum(row.weak_match_element_count for row in rows),
+        "requirements_by_conflict_type": requirements_by_conflict_type,
+        "conflict_findings_by_type": conflict_findings_by_type,
         "avg_grounded_evidence": round(
             sum(int(row.grounded_evidence_count or 0) for row in rows) / total_units,
             4,
@@ -458,11 +1630,22 @@ def build_debug_report_rows(units: Sequence[EvaluationUnit]) -> list[dict[str, A
             "weight": unit.weight,
             "weight_modifier": unit.weight_modifier,
             "required_evidence_count_reason": unit.required_evidence_count_reason,
-            "final_label": unit.final_label,
+            "quote_label": unit.final_label,
+            "evidence_audit_status": _resolve_evidence_audit_status(
+                has_conflict=_resolve_debug_has_conflict(unit),
+                final_element_coverage_ratio=_resolve_element_coverage_ratio(unit.final_element_assessment),
+                grounded_evidence_count=_resolve_debug_grounded_evidence_count(unit),
+            ),
             "evidence_status": unit.evidence_status,
             "required_evidence_count": unit.required_evidence_count,
             "grounded_evidence_count": _resolve_debug_grounded_evidence_count(unit),
             "evidence_coverage_ratio": _resolve_debug_evidence_coverage_ratio(unit),
+            "required_element_count": _resolve_required_element_count(unit),
+            "supported_element_count": _resolve_supported_required_element_count(unit),
+            "final_element_coverage_ratio": _resolve_element_coverage_ratio(unit.final_element_assessment),
+            "stage_1_element_coverage_ratio": _resolve_element_coverage_ratio(unit.stage_1_element_assessment),
+            "stage_2_element_coverage_ratio": _resolve_element_coverage_ratio(unit.stage_2_element_assessment),
+            "stage_3_element_coverage_ratio": _resolve_element_coverage_ratio(unit.stage_3_element_assessment),
             "grounded_chunk_count": _resolve_debug_grounded_chunk_count(unit),
             "grounded_subsection_count": len(_resolve_debug_grounded_subsection_ids(unit)),
             "has_conflict": _resolve_debug_has_conflict(unit),
@@ -478,6 +1661,54 @@ def build_debug_report_rows(units: Sequence[EvaluationUnit]) -> list[dict[str, A
             "stage_1_label": unit.stage_1_answer.label,
             "stage_2_label": unit.stage_2_answer.label,
             "stage_3_label": unit.stage_3_answer.label,
+            "stage_1_evidence_pipeline": _build_stage_evidence_pipeline_counters(
+                deliverable_id=unit.deliverable.deliverable_id,
+                stage_key="stage_1",
+                stage_judgment=unit.stage_1_answer,
+                record_nodes=unit.record_evidence_chunks,
+                requirement_elements=unit.requirement_elements,
+                stage_element_assessment=unit.stage_1_element_assessment,
+            ).model_dump(),
+            "stage_2_evidence_pipeline": _build_stage_evidence_pipeline_counters(
+                deliverable_id=unit.deliverable.deliverable_id,
+                stage_key="stage_2",
+                stage_judgment=unit.stage_2_answer,
+                record_nodes=unit.record_evidence_chunks,
+                requirement_elements=unit.requirement_elements,
+                stage_element_assessment=unit.stage_2_element_assessment,
+            ).model_dump(),
+            "stage_3_evidence_pipeline": _build_stage_evidence_pipeline_counters(
+                deliverable_id=unit.deliverable.deliverable_id,
+                stage_key="stage_3",
+                stage_judgment=unit.stage_3_answer,
+                record_nodes=unit.record_evidence_chunks,
+                requirement_elements=unit.requirement_elements,
+                stage_element_assessment=unit.stage_3_element_assessment,
+            ).model_dump(),
+            "requirement_elements": [element.model_dump(exclude_none=True) for element in unit.requirement_elements],
+            "stage_1_element_assessment": (
+                unit.stage_1_element_assessment.model_dump(exclude_none=True)
+                if unit.stage_1_element_assessment is not None else None
+            ),
+            "stage_2_element_assessment": (
+                unit.stage_2_element_assessment.model_dump(exclude_none=True)
+                if unit.stage_2_element_assessment is not None else None
+            ),
+            "stage_3_element_assessment": (
+                unit.stage_3_element_assessment.model_dump(exclude_none=True)
+                if unit.stage_3_element_assessment is not None else None
+            ),
+            "final_element_assessment": (
+                unit.final_element_assessment.model_dump(exclude_none=True)
+                if unit.final_element_assessment is not None else None
+            ),
+            "conflict_count": _resolve_element_conflict_count(unit.final_element_assessment),
+            "conflict_type": _resolve_element_conflict_type(unit.final_element_assessment),
+            "conflict_types": _resolve_element_conflict_types(unit.final_element_assessment),
+            "conflicting_element_ids": _resolve_element_conflicting_element_ids(unit.final_element_assessment),
+            "conflicting_evidence_ids": _resolve_element_conflicting_evidence_ids(unit.final_element_assessment),
+            "conflicting_quotes": _resolve_element_conflicting_quotes(unit.final_element_assessment),
+            "conflict_reason": _resolve_element_conflict_reason(unit.final_element_assessment),
             "rationale": _resolve_debug_rationale(unit),
         }
         for unit in units
@@ -490,12 +1721,33 @@ def build_debug_report_summary(units: Sequence[EvaluationUnit]) -> dict[str, Any
         float(row.get("subsection_coverage_ratio") or 0.0)
         for row in rows
     ]
+    requirements_by_conflict_type: dict[str, int] = {}
+    conflict_findings_by_type: dict[str, int] = {}
+    for unit in units:
+        assessment_requirement_counts, assessment_finding_counts = _summarize_assessment_conflict_types(
+            unit.final_element_assessment
+        )
+        for conflict_type, count in assessment_requirement_counts.items():
+            requirements_by_conflict_type[conflict_type] = requirements_by_conflict_type.get(conflict_type, 0) + count
+        for conflict_type, count in assessment_finding_counts.items():
+            conflict_findings_by_type[conflict_type] = conflict_findings_by_type.get(conflict_type, 0) + count
     return {
         "total_units": len(units),
-        "final_label_counts": {
-            "satisfied": sum(1 for row in rows if row.get("final_label") == "satisfied"),
-            "partial": sum(1 for row in rows if row.get("final_label") == "partial"),
-            "not_satisfied": sum(1 for row in rows if row.get("final_label") == "not_satisfied"),
+        "quote_label_counts": {
+            "satisfied": sum(1 for row in rows if row.get("quote_label") == "satisfied"),
+            "partial": sum(1 for row in rows if row.get("quote_label") == "partial"),
+            "not_satisfied": sum(1 for row in rows if row.get("quote_label") == "not_satisfied"),
+        },
+        "requirements_with_conflict": sum(1 for row in rows if bool(row.get("has_conflict"))),
+        "total_conflict_findings": sum(int(row.get("total_conflict_findings") or 0) for row in rows),
+        "requirements_by_conflict_type": requirements_by_conflict_type,
+        "conflict_findings_by_type": conflict_findings_by_type,
+        "evidence_audit_status_counts": {
+            "supported": sum(1 for row in rows if row.get("evidence_audit_status") == "supported"),
+            "partial": sum(1 for row in rows if row.get("evidence_audit_status") == "partial"),
+            "weak_match": sum(1 for row in rows if row.get("evidence_audit_status") == "weak_match"),
+            "missing": sum(1 for row in rows if row.get("evidence_audit_status") == "missing"),
+            "conflict": sum(1 for row in rows if row.get("evidence_audit_status") == "conflict"),
         },
         "evidence_status_counts": {
             "supported": sum(1 for row in rows if row.get("evidence_status") == "supported"),
@@ -538,9 +1790,9 @@ def build_compact_summary(units: Sequence[EvaluationUnit]) -> dict[str, Any]:
 
     return {
         "total_units": total_units,
-        "satisfied": sum(1 for row in rows if row.get("final_label") == "satisfied"),
-        "partial": sum(1 for row in rows if row.get("final_label") == "partial"),
-        "not_satisfied": sum(1 for row in rows if row.get("final_label") == "not_satisfied"),
+        "satisfied": sum(1 for row in rows if row.get("quote_label") == "satisfied"),
+        "partial": sum(1 for row in rows if row.get("quote_label") == "partial"),
+        "not_satisfied": sum(1 for row in rows if row.get("quote_label") == "not_satisfied"),
         "supported": sum(1 for row in rows if row.get("evidence_status") == "supported"),
         "missing": sum(1 for row in rows if row.get("evidence_status") == "missing"),
         "conflicting": sum(1 for row in rows if row.get("evidence_status") == "conflicting"),
@@ -564,7 +1816,8 @@ def build_edge_case_debug_rows(units: Sequence[EvaluationUnit]) -> list[dict[str
         "weight",
         "weight_modifier",
         "required_evidence_count_reason",
-        "final_label",
+        "quote_label",
+        "evidence_audit_status",
         "evidence_status",
         "required_evidence_count",
         "grounded_evidence_count",
@@ -616,7 +1869,8 @@ def write_debug_report_csv(
         "weight",
         "weight_modifier",
         "required_evidence_count_reason",
-        "final_label",
+        "quote_label",
+        "evidence_audit_status",
         "evidence_status",
         "contradiction_type",
         "evidence_score",
@@ -625,6 +1879,21 @@ def write_debug_report_csv(
         "stage_1_label",
         "stage_2_label",
         "stage_3_label",
+        "stage_1_evidence_pipeline",
+        "stage_2_evidence_pipeline",
+        "stage_3_evidence_pipeline",
+        "requirement_elements",
+        "stage_1_element_assessment",
+        "stage_2_element_assessment",
+        "stage_3_element_assessment",
+        "final_element_assessment",
+        "conflict_count",
+        "conflict_type",
+        "conflict_types",
+        "conflicting_element_ids",
+        "conflicting_evidence_ids",
+        "conflicting_quotes",
+        "conflict_reason",
         "rationale",
     ]
     with open(output_path, "w", encoding="utf-8", newline="") as file:
@@ -961,6 +2230,7 @@ def _resolve_base_evidence_status(
 
 def _build_metrics(
     *,
+    deliverable_id: str,
     evidence_status: str,
     final_label: ComplianceLabel | None,
     required_evidence_count: int,
@@ -977,15 +2247,20 @@ def _build_metrics(
         not_satisfied_count=1 if final_label == "not_satisfied" else 0,
         supported_count=1 if evidence_status == "supported" else 0,
         missing_count=1 if evidence_status == "missing" else 0,
-        conflicting_count=1 if evidence_status == "conflicting" else 0,
+        requirements_with_conflict=1 if any(stage.conflict_flag for stage in stage_judgments) else 0,
+        total_conflict_findings=0,  # Not available at unit level
+        requirements_by_conflict_type={},  # Not available at unit level
+        conflict_findings_by_type={},  # Not available at unit level
         avg_grounded_evidence_count=float(
             _count_grounded_record_evidence(
+                deliverable_id=deliverable_id,
                 stage_judgments=stage_judgments,
                 record_nodes=record_nodes,
             )
         ),
         avg_evidence_coverage_ratio=_compute_evidence_coverage_ratio(
             grounded_evidence_count=_count_grounded_record_evidence(
+                deliverable_id=deliverable_id,
                 stage_judgments=stage_judgments,
                 record_nodes=record_nodes,
             ),
@@ -1059,22 +2334,229 @@ def _resolve_debug_rationale(unit: EvaluationUnit) -> str:
 
 def _resolve_debug_grounded_evidence_count(unit: EvaluationUnit) -> int:
     return _count_grounded_record_evidence(
+        deliverable_id=unit.deliverable.deliverable_id,
         stage_judgments=(unit.stage_1_answer, unit.stage_2_answer, unit.stage_3_answer),
         record_nodes=unit.record_evidence_chunks,
     )
 
 
+def _resolve_required_element_count(unit: EvaluationUnit) -> int:
+    return sum(1 for element in unit.requirement_elements if element.required)
+
+
+def _resolve_supported_required_element_count(unit: EvaluationUnit) -> int:
+    if unit.final_element_assessment is None:
+        return 0
+    return int(unit.final_element_assessment.supported_required_elements or 0)
+
+
+def _resolve_element_coverage_ratio(assessment: StageElementAssessment | None) -> float:
+    if assessment is None:
+        return 0.0
+    return float(assessment.element_coverage_ratio or 0.0)
+
+
 def _resolve_stage_grounded_evidence_count(
     *,
+    deliverable_id: str,
     stage_judgment: StageJudgment,
     record_nodes: Sequence[EvidenceNode],
 ) -> int:
     return len(
         _resolve_stage_grounded_record_evidence_items(
+            deliverable_id=deliverable_id,
             stage_judgment=stage_judgment,
             record_nodes=record_nodes,
         )
     )
+
+
+def _build_stage_evidence_pipeline_counters(
+    *,
+    deliverable_id: str,
+    stage_key: str,
+    stage_judgment: StageJudgment,
+    record_nodes: Sequence[EvidenceNode],
+    requirement_elements: Sequence[RequirementElement],
+    stage_element_assessment: StageElementAssessment | None,
+) -> EvidencePipelineCounters:
+    grounded_items = _resolve_stage_grounded_record_evidence_items(
+        deliverable_id=deliverable_id,
+        stage_judgment=stage_judgment,
+        record_nodes=record_nodes,
+    )
+    required_elements = [element for element in requirement_elements if element.required]
+    element_supported_quote_count = _count_element_supported_quotes(
+        grounded_record_evidence_items=grounded_items,
+        requirement_elements=required_elements,
+    )
+    required_element_count = len(required_elements)
+    element_coverage_ratio = (
+        _resolve_element_coverage_ratio(stage_element_assessment)
+        if stage_element_assessment is not None
+        else 0.0
+    )
+    return EvidencePipelineCounters(
+        retrieved_candidate_count=_resolve_stage_retrieved_candidate_count(
+            stage_key=stage_key,
+            record_nodes=record_nodes,
+        ),
+        accepted_quote_count=_resolve_stage_accepted_quote_count(stage_judgment=stage_judgment),
+        grounded_quote_count=len(grounded_items),
+        element_supported_quote_count=element_supported_quote_count,
+        required_element_count=required_element_count,
+        element_coverage_ratio=element_coverage_ratio,
+        quote_element_disagreement=bool(grounded_items) and element_supported_quote_count == 0,
+    )
+
+
+def _resolve_stage_retrieved_candidate_count(
+    *,
+    stage_key: str,
+    record_nodes: Sequence[EvidenceNode],
+) -> int:
+    if stage_key == "stage_1":
+        return 0
+    return len(record_nodes)
+
+
+def _resolve_stage_accepted_quote_count(*, stage_judgment: StageJudgment) -> int:
+    if stage_judgment.supporting_record_evidence_items:
+        return len(stage_judgment.supporting_record_evidence_items)
+    return len([evidence_id for evidence_id in stage_judgment.supporting_record_evidence_ids if evidence_id])
+
+
+def _count_element_supported_quotes(
+    *,
+    grounded_record_evidence_items: Sequence[dict[str, str]],
+    requirement_elements: Sequence[RequirementElement],
+) -> int:
+    count = 0
+    for item in grounded_record_evidence_items:
+        quote_text = str(item.get("text") or "").strip()
+        if not quote_text:
+            continue
+        if any(
+            _does_grounded_quote_support_element(element=element, quote_text=quote_text)
+            for element in requirement_elements
+        ):
+            count += 1
+    return count
+
+
+def _build_quote_element_mapping_debug(
+    *,
+    requirement_elements: Sequence[RequirementElement],
+    grounded_record_evidence_items: Sequence[dict[str, str]],
+) -> list[QuoteElementMappingDebug]:
+    return [
+        _build_single_quote_element_mapping_debug(
+            quote_text=str(item.get("text") or "").strip(),
+            requirement_elements=requirement_elements,
+        )
+        for item in grounded_record_evidence_items
+        if str(item.get("text") or "").strip()
+    ]
+
+
+def _build_single_quote_element_mapping_debug(
+    *,
+    quote_text: str,
+    requirement_elements: Sequence[RequirementElement],
+) -> QuoteElementMappingDebug:
+    matched_element_ids = [
+        element.element_id
+        for element in requirement_elements
+        if _does_grounded_quote_support_element(element=element, quote_text=quote_text)
+    ]
+    reason = (
+        _explain_quote_element_match(
+            quote_text=quote_text,
+            requirement_elements=requirement_elements,
+        )
+        if matched_element_ids
+        else _explain_quote_element_non_match(
+            quote_text=quote_text,
+            requirement_elements=requirement_elements,
+        )
+    )
+    return QuoteElementMappingDebug(
+        quote_text=quote_text,
+        matched_element_ids=matched_element_ids,
+        reason=reason,
+    )
+
+
+def _explain_quote_element_match(
+    *,
+    quote_text: str,
+    requirement_elements: Sequence[RequirementElement],
+) -> str:
+    if any(str(element.element_type or "").strip() == "per_function" for element in requirement_elements):
+        if _extract_table_rows(quote_text):
+            return "matched_table_row"
+        return "matched_narrative_function_attribute"
+    return "matched"
+
+
+def _explain_quote_element_non_match(
+    *,
+    quote_text: str,
+    requirement_elements: Sequence[RequirementElement],
+) -> str:
+    if any(str(element.element_type or "").strip() == "per_function" for element in requirement_elements):
+        return _explain_per_function_quote_non_match(
+            quote_text=quote_text,
+            requirement_elements=requirement_elements,
+        )
+    return "no_element_match"
+
+
+def _explain_per_function_quote_non_match(
+    *,
+    quote_text: str,
+    requirement_elements: Sequence[RequirementElement],
+) -> str:
+    rows = _extract_table_rows(quote_text)
+    if not rows:
+        if _is_generic_per_function_narrative(quote_text):
+            return "generic_not_per_function_specific"
+        return "not_table_or_function_content"
+    data_rows = [
+        cells
+        for cells in rows
+        if cells and not _is_table_header_cells(cells) and not _is_table_separator_cells(cells)
+    ]
+    if not data_rows:
+        if any(_is_table_header_cells(cells) for cells in rows):
+            return "header_only"
+        return "no_data_rows"
+    if not any(_row_has_function_identifier(cells) for cells in data_rows):
+        return "no_function_row"
+    attribute_labels = {
+        _infer_per_function_attribute_label(element.element_text)
+        for element in requirement_elements
+    }
+    if "criticality" in attribute_labels and not any(
+        _row_supports_per_function_attribute(cells=cells, column_index=1, attribute_keywords=("criticality",))
+        for cells in data_rows
+    ):
+        return "missing_criticality_value"
+    if "complexity" in attribute_labels and not any(
+        _row_supports_per_function_attribute(cells=cells, column_index=2, attribute_keywords=("complexity",))
+        for cells in data_rows
+    ):
+        return "missing_complexity_value"
+    if "risk class" in attribute_labels and not any(
+        _row_supports_per_function_attribute(
+            cells=cells,
+            column_index=3,
+            attribute_keywords=("risk class", "risk classification", "risk"),
+        )
+        for cells in data_rows
+    ):
+        return "missing_risk_class_value"
+    return "no_per_function_element_match"
 
 
 def _resolve_debug_grounded_chunk_count(unit: EvaluationUnit) -> int:
@@ -1086,9 +2568,96 @@ def _resolve_debug_grounded_chunk_count(unit: EvaluationUnit) -> int:
 
 
 def _resolve_debug_has_conflict(unit: EvaluationUnit) -> bool:
+    if unit.final_element_assessment is not None and bool(unit.final_element_assessment.has_conflict):
+        return True
     if unit.evidence_status == "conflicting":
         return True
     return _contradiction_type_implies_conflict(unit.contradiction_type)
+
+
+def _resolve_evidence_audit_status(
+    *,
+    has_conflict: bool,
+    final_element_coverage_ratio: float,
+    grounded_evidence_count: int,
+) -> str:
+    if has_conflict:
+        return "conflict"
+    if final_element_coverage_ratio >= 1.0:
+        return "supported"
+    if final_element_coverage_ratio > 0:
+        return "partial"
+    if grounded_evidence_count > 0:
+        return "weak_match"
+    return "missing"
+
+
+def _summarize_assessment_conflict_types(
+    assessment: StageElementAssessment | None,
+) -> tuple[dict[str, int], dict[str, int]]:
+    if assessment is None:
+        return {}, {}
+    requirements_by_conflict_type: dict[str, int] = {}
+    conflict_findings_by_type: dict[str, int] = {}
+    assessment_conflict_types: set[str] = set()
+    for element in assessment.elements:
+        element_conflict_types = [
+            str(conflict_type or "").strip()
+            for conflict_type in element.conflict_types
+            if str(conflict_type or "").strip()
+        ]
+        if not element_conflict_types:
+            continue
+        assessment_conflict_types.update(element_conflict_types)
+        for conflict_type in element_conflict_types:
+            conflict_findings_by_type[conflict_type] = conflict_findings_by_type.get(conflict_type, 0) + 1
+    for conflict_type in assessment_conflict_types:
+        requirements_by_conflict_type[conflict_type] = requirements_by_conflict_type.get(conflict_type, 0) + 1
+    return requirements_by_conflict_type, conflict_findings_by_type
+
+
+def _resolve_element_conflict_count(assessment: StageElementAssessment | None) -> int:
+    if assessment is None:
+        return 0
+    return int(assessment.conflict_count or 0)
+
+
+def _resolve_element_conflict_type(assessment: StageElementAssessment | None) -> str | None:
+    if assessment is None:
+        return None
+    value = str(assessment.conflict_type or "").strip()
+    return value or None
+
+
+def _resolve_element_conflict_types(assessment: StageElementAssessment | None) -> list[str]:
+    if assessment is None:
+        return []
+    return [str(item).strip() for item in assessment.conflict_types if str(item).strip()]
+
+
+def _resolve_element_conflicting_element_ids(assessment: StageElementAssessment | None) -> list[str]:
+    if assessment is None:
+        return []
+    return [str(item).strip() for item in assessment.conflicting_element_ids if str(item).strip()]
+
+
+def _resolve_element_conflicting_evidence_ids(assessment: StageElementAssessment | None) -> list[str]:
+    if assessment is None:
+        return []
+    return [str(item).strip() for item in assessment.conflicting_evidence_ids if str(item).strip()]
+
+
+def _resolve_element_conflicting_quotes(assessment: StageElementAssessment | None) -> list[str]:
+    if assessment is None:
+        return []
+    return [str(item).strip() for item in assessment.conflicting_quotes if str(item).strip()]
+
+
+def _resolve_element_conflict_reason(assessment: StageElementAssessment | None) -> str | None:
+    if assessment is None:
+        return None
+    value = str(assessment.conflict_reason or "").strip()
+    return value or None
 
 
 def _resolve_debug_subsection_ids(unit: EvaluationUnit) -> list[str]:
@@ -1199,7 +2768,7 @@ def _contradiction_type_implies_conflict(contradiction_type: ContradictionType) 
 
 
 def _is_suspicious_debug_row(row: dict[str, Any]) -> bool:
-    final_label = row.get("final_label")
+    final_label = row.get("quote_label")
     evidence_status = row.get("evidence_status")
     contradiction_type = row.get("contradiction_type")
     grounded_evidence_count = int(row.get("grounded_evidence_count") or 0)
@@ -1301,11 +2870,13 @@ def _compute_llm_overclaim_rate(
 
 def _count_grounded_record_evidence(
     *,
+    deliverable_id: str,
     stage_judgments: Sequence[StageJudgment],
     record_nodes: Sequence[EvidenceNode],
 ) -> int:
     return len(
         _resolve_grounded_record_evidence_items(
+            deliverable_id=deliverable_id,
             stage_judgments=stage_judgments,
             record_nodes=record_nodes,
         )
@@ -1394,6 +2965,7 @@ def _resolve_grounded_record_nodes(
 
 def _resolve_grounded_record_evidence_items(
     *,
+    deliverable_id: str,
     stage_judgments: Sequence[StageJudgment],
     record_nodes: Sequence[EvidenceNode],
 ) -> list[dict[str, str]]:
@@ -1424,16 +2996,60 @@ def _resolve_grounded_record_evidence_items(
                 "section_label": node.section_label,
                 "heading_title": node.heading_title,
                 "source_document": node.source_document,
+                "source_stage": selected_stage.stage_key,
                 "text": node.text,
             }
             for node in record_nodes
             if node.evidence_id and node.evidence_id in accepted_record_id_set
         ]
-    grounded_items: list[dict[str, str]] = []
-    for item in accepted_items:
-        if _match_record_item_to_nodes(item, record_nodes):
-            grounded_items.append(item)
-    return grounded_items
+    return _normalize_grounded_record_evidence_items(
+        deliverable_id=deliverable_id,
+        stage_key=selected_stage.stage_key,
+        grounded_items=accepted_items,
+        record_nodes=record_nodes,
+    )
+
+
+def _resolve_grounded_record_evidence_ids(
+    *,
+    stage_judgments: Sequence[StageJudgment],
+) -> list[str]:
+    stage_lookup = {stage.stage_key: stage for stage in stage_judgments}
+    stage_3 = stage_lookup.get("stage_3")
+    stage_2 = stage_lookup.get("stage_2")
+    selected_stage = (
+        stage_3
+        if stage_3 and stage_3.supporting_record_evidence_ids
+        else stage_2
+        if stage_2 and stage_2.supporting_record_evidence_ids
+        else None
+    )
+    if selected_stage is None:
+        return []
+    return [evidence_id for evidence_id in selected_stage.supporting_record_evidence_ids if evidence_id]
+
+
+def _resolve_stage_grounded_record_nodes(
+    *,
+    stage_judgment: StageJudgment,
+    record_nodes: Sequence[EvidenceNode],
+) -> list[EvidenceNode]:
+    matched_ids: list[str] = [
+        str(evidence_id or "").strip()
+        for evidence_id in stage_judgment.supporting_record_evidence_ids
+        if str(evidence_id or "").strip()
+    ]
+    if not matched_ids and stage_judgment.supporting_record_evidence_items:
+        for item in stage_judgment.supporting_record_evidence_items:
+            matched_ids.extend(_match_record_item_to_nodes(item, record_nodes))
+    matched_id_set = {evidence_id for evidence_id in matched_ids if evidence_id}
+    if not matched_id_set:
+        return []
+    return [
+        node
+        for node in record_nodes
+        if node.evidence_id and node.evidence_id in matched_id_set
+    ]
 
 
 def _merge_stage_3_grounded_record_evidence(
@@ -1491,6 +3107,7 @@ def _stage_record_item_key(item: dict[str, str]) -> str:
 
 def _resolve_stage_grounded_record_evidence_items(
     *,
+    deliverable_id: str,
     stage_judgment: StageJudgment,
     record_nodes: Sequence[EvidenceNode],
 ) -> list[dict[str, str]]:
@@ -1509,16 +3126,83 @@ def _resolve_stage_grounded_record_evidence_items(
                 "section_label": node.section_label,
                 "heading_title": node.heading_title,
                 "source_document": node.source_document,
+                "source_stage": stage_judgment.stage_key,
                 "text": node.text,
             }
             for node in record_nodes
             if node.evidence_id and node.evidence_id in accepted_record_id_set
         ]
-    grounded_items: list[dict[str, str]] = []
-    for item in accepted_items:
-        if _match_record_item_to_nodes(item, record_nodes):
-            grounded_items.append(item)
-    return grounded_items
+    return _normalize_grounded_record_evidence_items(
+        deliverable_id=deliverable_id,
+        stage_key=stage_judgment.stage_key,
+        grounded_items=accepted_items,
+        record_nodes=record_nodes,
+    )
+
+
+def _normalize_grounded_record_evidence_items(
+    *,
+    deliverable_id: str,
+    stage_key: str,
+    grounded_items: Sequence[dict[str, str]],
+    record_nodes: Sequence[EvidenceNode],
+) -> list[dict[str, str]]:
+    normalized_items: list[dict[str, str]] = []
+    for item in grounded_items:
+        if not _match_record_item_to_nodes(item, record_nodes):
+            continue
+        quote_text = str(item.get("text") or "").strip()
+        if not quote_text:
+            continue
+        normalized_items.append(
+            {
+                "evidence_id": _resolve_grounded_record_item_evidence_id(
+                    item=item,
+                    record_nodes=record_nodes,
+                    deliverable_id=deliverable_id,
+                    stage_key=stage_key,
+                ),
+                "section_id": str(item.get("section_id") or "").strip(),
+                "subsection_id": str(item.get("subsection_id") or "").strip(),
+                "section_label": str(item.get("section_label") or "").strip(),
+                "heading_title": str(item.get("heading_title") or "").strip(),
+                "source_document": str(item.get("source_document") or "").strip(),
+                "source_stage": str(item.get("source_stage") or "").strip() or stage_key,
+                "text": quote_text,
+            }
+        )
+    return normalized_items
+
+
+def _resolve_grounded_record_item_evidence_id(
+    *,
+    item: dict[str, Any],
+    record_nodes: Sequence[EvidenceNode],
+    deliverable_id: str,
+    stage_key: str,
+) -> str:
+    explicit_id = str(item.get("evidence_id") or "").strip()
+    if explicit_id:
+        return explicit_id
+    matched_ids = _match_record_item_to_nodes(item, record_nodes)
+    if matched_ids:
+        return matched_ids[0]
+    return _build_grounded_quote_fallback_evidence_id(
+        deliverable_id=deliverable_id,
+        stage_key=stage_key,
+        quote_text=str(item.get("text") or ""),
+    )
+
+
+def _build_grounded_quote_fallback_evidence_id(
+    *,
+    deliverable_id: str,
+    stage_key: str,
+    quote_text: str,
+) -> str:
+    normalized_quote = _normalized_match_key(quote_text)
+    quote_hash = hashlib.sha1(normalized_quote.encode("utf-8")).hexdigest()[:12]
+    return f"{deliverable_id}:{stage_key}:{quote_hash}"
 
 
 def _detect_conflict(

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,9 @@ from app.services.retrieval.faiss_retrieval import (
 )
 from app.services.storage_paths import RECORD_INDEXES_DIR
 
+logger = logging.getLogger(__name__)
+CURRENT_RECORD_INDEX_VERSION = "record_index_v3"
+
 
 def ensure_record_index(document_payload: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]:
     chunks = build_document_section_chunks([document_payload])
@@ -24,12 +30,24 @@ def ensure_record_index(document_payload: dict[str, Any]) -> tuple[Any, list[dic
 
     fingerprint = fingerprint_chunks(chunks)
     index_dir = get_record_index_dir(document_payload)
-    cached_index = load_cached_faiss_index(
+    rebuild_reason = _resolve_record_index_rebuild_reason(
         index_dir=index_dir,
-        expected_fingerprint=fingerprint,
+        expected_chunk_count=len(chunks),
     )
-    if cached_index is not None:
-        return cached_index, chunks
+    if rebuild_reason is None:
+        cached_index = load_cached_faiss_index(
+            index_dir=index_dir,
+            expected_fingerprint=fingerprint,
+        )
+        if cached_index is not None:
+            return cached_index, chunks
+        rebuild_reason = "fingerprint_or_model_mismatch"
+
+    logger.info(
+        "Rebuilding record index for %s: %s",
+        document_payload.get("source_filename") or document_payload.get("stored_filename") or "unknown-record",
+        rebuild_reason,
+    )
 
     index, _ = build_faiss_index(chunks)
     save_cached_faiss_index(
@@ -37,6 +55,12 @@ def ensure_record_index(document_payload: dict[str, Any]) -> tuple[Any, list[dic
         index=index,
         chunks=chunks,
         fingerprint=fingerprint,
+        index_version=CURRENT_RECORD_INDEX_VERSION,
+        chunking_config=_build_record_chunking_config_snapshot(),
+        build_metadata={
+            "rebuilt_at": datetime.now(timezone.utc).isoformat(),
+            "rebuild_reason": rebuild_reason,
+        },
     )
     return index, chunks
 
@@ -114,3 +138,54 @@ def get_record_index_dir(document_payload: dict[str, Any]) -> Path:
     if not index_key:
         raise RuntimeError("Record document is missing both content_hash and stored_filename.")
     return RECORD_INDEXES_DIR / str(index_key)
+
+
+def _resolve_record_index_rebuild_reason(
+    *,
+    index_dir: Path,
+    expected_chunk_count: int,
+) -> str | None:
+    meta_path = index_dir / "meta.json"
+    chunks_path = index_dir / "chunks.json"
+    index_path = index_dir / "index.faiss"
+    if not meta_path.exists():
+        return "missing_meta_json"
+    if not chunks_path.exists():
+        return "missing_chunks_json"
+    if not index_path.exists():
+        return "missing_faiss_index"
+
+    try:
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return "invalid_meta_json"
+
+    chunk_count = metadata.get("chunk_count")
+    if not isinstance(chunk_count, int) or chunk_count <= 0:
+        return "invalid_chunk_count"
+    if chunk_count != expected_chunk_count:
+        return f"chunk_count_mismatch old={chunk_count} current={expected_chunk_count}"
+
+    current_version = metadata.get("index_version")
+    if current_version != CURRENT_RECORD_INDEX_VERSION:
+        return (
+            "stale index_version "
+            f"old={current_version!r} current={CURRENT_RECORD_INDEX_VERSION!r}"
+        )
+
+    return None
+
+
+def _build_record_chunking_config_snapshot() -> dict[str, Any]:
+    return {
+        "section_token_limit": getattr(build_document_section_chunks, "__globals__", {}).get("SECTION_TOKEN_LIMIT"),
+        "subchunk_token_overlap": getattr(build_document_section_chunks, "__globals__", {}).get("SUBCHUNK_TOKEN_OVERLAP"),
+        "min_retrieval_section_text_length": getattr(
+            build_document_section_chunks,
+            "__globals__",
+        ).get("MIN_RETRIEVAL_SECTION_TEXT_LENGTH"),
+        "min_final_subchunk_tokens": getattr(
+            build_document_section_chunks,
+            "__globals__",
+        ).get("MIN_FINAL_SUBCHUNK_TOKENS"),
+    }

@@ -151,6 +151,9 @@ def save_cached_faiss_index(
     index: Any,
     chunks: list[dict[str, Any]],
     fingerprint: str,
+    index_version: str | None = None,
+    chunking_config: dict[str, Any] | None = None,
+    build_metadata: dict[str, Any] | None = None,
 ) -> None:
     if faiss is None:  # pragma: no cover
         raise RuntimeError("FAISS is not installed. Add `faiss-cpu` to the backend environment.")
@@ -169,6 +172,9 @@ def save_cached_faiss_index(
                 "embedding_dim": int(index.d),
                 "embedding_model": EMBED_MODEL_NAME,
                 "reranker_model": RERANKER_MODEL_NAME,
+                "index_version": index_version,
+                "chunking_config": chunking_config or {},
+                "build_metadata": build_metadata or {},
             },
             ensure_ascii=False,
             indent=2,
@@ -634,6 +640,15 @@ def _split_clean_section_body(value: str) -> list[str]:
 def _clean_text_block(value: str | None) -> str:
     if not value:
         return ""
+    # Remove synthetic dataset metadata lines
+    lines = value.splitlines()
+    cleaned_lines = []
+    for line in lines:
+        # Skip lines that contain synthetic metadata patterns
+        if re.search(r"(Document type|Final label|Status):\s*", line.strip()):
+            continue
+        cleaned_lines.append(line)
+    value = "\n".join(cleaned_lines)
     blocks = [_preserve_text_block_structure(block) for block in re.split(r"\n\s*\n", value)]
     blocks = [block for block in blocks if block]
     return "\n\n".join(blocks).strip()

@@ -189,7 +189,8 @@ export type EvaluationV3ContradictionType =
 
 export type EvaluationV3ResultRow = {
   deliverable_id: string;
-  final_label?: EvaluationV3Label | null;
+  quote_label?: EvaluationV3Label | null;
+  evidence_audit_status: EvaluationV3Label;
   stage_1_label?: EvaluationV3Label | null;
   stage_2_label?: EvaluationV3Label | null;
   stage_3_label?: EvaluationV3Label | null;
@@ -205,10 +206,19 @@ export type EvaluationV3ResultRow = {
   evidence_status: EvaluationV3EvidenceStatus;
   grounded_evidence_count: number;
   required_evidence_count: number;
+  required_element_count: number;
+  supported_element_count: number;
+  missing_element_count: number;
+  contradicted_element_count: number;
+  weak_match_element_count: number;
+  total_conflict_findings: number;
+  conflicted_element_ids: string[];
   grounded_chunk_count?: number;
   evidence_coverage_ratio: number;
   has_conflict: boolean;
   contradiction_type: EvaluationV3ContradictionType;
+  conflict_count?: number;
+  conflict_type?: string;
 };
 
 export type EvaluationV3Metrics = {
@@ -217,7 +227,14 @@ export type EvaluationV3Metrics = {
   not_satisfied_count: number;
   supported_count: number;
   missing_count: number;
-  conflicting_count: number;
+  requirements_with_conflict: number;
+  total_conflict_findings: number;
+  total_required_elements: number;
+  total_supported_elements: number;
+  total_missing_elements: number;
+  total_contradicted_elements: number;
+  total_weak_match_elements: number;
+  conflict_type_counts: Record<string, number>;
   avg_grounded_evidence_count: number;
   avg_evidence_coverage_ratio: number;
 };

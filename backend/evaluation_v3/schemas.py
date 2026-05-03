@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 ComplianceLabel = Literal["satisfied", "partial", "not_satisfied"]
 StageKey = Literal["stage_1", "stage_2", "stage_3", "final"]
 EvidenceStatus = Literal["supported", "partial", "missing", "conflicting"]
+EvidenceAuditStatus = Literal["supported", "partial", "weak_match", "missing", "conflict"]
+ElementStatus = Literal["supported", "partial", "missing", "contradicted", "weak_match"]
 RequirementType = Literal[
     "residual_risk_acceptability",
     "benefit_risk_rationale",
@@ -42,7 +44,10 @@ EVALUATION_V3_ANALYSIS_METRICS: Final[tuple[str, ...]] = (
     "not_satisfied_count",
     "supported_count",
     "missing_count",
-    "conflicting_count",
+    "requirements_with_conflict",
+    "total_conflict_findings",
+    "requirements_by_conflict_type",
+    "conflict_findings_by_type",
     "avg_grounded_evidence_count",
     "avg_evidence_coverage_ratio",
 )
@@ -157,6 +162,7 @@ class StageJudgment(BaseModel):
                 "section_label": _normalize_text(item.get("section_label")),
                 "heading_title": _normalize_text(item.get("heading_title")),
                 "source_document": _normalize_text(item.get("source_document")),
+                "source_stage": _normalize_text(item.get("source_stage")),
                 "text": _normalize_text(item.get("text")),
             }
             if normalized["text"]:
@@ -232,16 +238,147 @@ class EvaluationV3Metrics(BaseModel):
     not_satisfied_count: int = Field(default=0, ge=0)
     supported_count: int = Field(default=0, ge=0)
     missing_count: int = Field(default=0, ge=0)
-    conflicting_count: int = Field(default=0, ge=0)
+    requirements_with_conflict: int = Field(default=0, ge=0)
+    total_conflict_findings: int = Field(default=0, ge=0)
+    total_required_elements: int = Field(default=0, ge=0)
+    total_supported_elements: int = Field(default=0, ge=0)
+    total_missing_elements: int = Field(default=0, ge=0)
+    total_contradicted_elements: int = Field(default=0, ge=0)
+    total_weak_match_elements: int = Field(default=0, ge=0)
+    requirements_by_conflict_type: dict[str, int] = Field(default_factory=dict)
+    conflict_findings_by_type: dict[str, int] = Field(default_factory=dict)
     avg_grounded_evidence_count: float = Field(default=0.0, ge=0.0)
     avg_evidence_coverage_ratio: float = Field(default=0.0, ge=0.0)
+
+
+class RequirementElement(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    element_id: str
+    element_text: str
+    element_type: str = ""
+    required: bool = True
+
+    @model_validator(mode="after")
+    def normalize_fields(self) -> "RequirementElement":
+        self.element_id = _normalize_text(self.element_id)
+        self.element_text = _normalize_text(self.element_text)
+        self.element_type = _normalize_text(self.element_type)
+        return self
+
+
+class RequirementElementSupport(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    element_id: str
+    element_text: str = ""
+    element_type: str = ""
+    required: bool = True
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    supporting_quotes: list[str] = Field(default_factory=list)
+    element_status: ElementStatus = "missing"
+    has_conflict: bool = False
+    conflict_types: list[str] = Field(default_factory=list)
+    conflicting_evidence_ids: list[str] = Field(default_factory=list)
+    conflicting_quotes: list[str] = Field(default_factory=list)
+    conflict_reasons: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def normalize_fields(self) -> "RequirementElementSupport":
+        self.element_id = _normalize_text(self.element_id)
+        self.element_text = _normalize_text(self.element_text)
+        self.element_type = _normalize_text(self.element_type)
+        self.supporting_evidence_ids = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.supporting_evidence_ids if _normalize_text(item)]
+        )
+        self.supporting_quotes = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.supporting_quotes if _normalize_text(item)]
+        )
+        self.conflict_types = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.conflict_types if _normalize_text(item)]
+        )
+        self.conflicting_evidence_ids = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.conflicting_evidence_ids if _normalize_text(item)]
+        )
+        self.conflicting_quotes = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.conflicting_quotes if _normalize_text(item)]
+        )
+        self.conflict_reasons = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.conflict_reasons if _normalize_text(item)]
+        )
+        return self
+
+
+class QuoteElementMappingDebug(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    quote_text: str
+    matched_element_ids: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def normalize_fields(self) -> "QuoteElementMappingDebug":
+        self.quote_text = _normalize_text(self.quote_text)
+        self.matched_element_ids = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.matched_element_ids if _normalize_text(item)]
+        )
+        self.reason = _normalize_text(self.reason)
+        return self
+
+
+class StageElementAssessment(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    stage_key: str
+    supported_required_elements: int = Field(default=0, ge=0)
+    total_required_elements: int = Field(default=0, ge=0)
+    element_coverage_ratio: float = Field(default=0.0, ge=0.0)
+    elements: list[RequirementElementSupport] = Field(default_factory=list)
+    quote_mapping_debug: list[QuoteElementMappingDebug] = Field(default_factory=list)
+    conflict_count: int = Field(default=0, ge=0)
+    has_conflict: bool = False
+    conflict_type: str | None = None
+    conflict_types: list[str] = Field(default_factory=list)
+    conflicting_element_ids: list[str] = Field(default_factory=list)
+    conflicting_evidence_ids: list[str] = Field(default_factory=list)
+    conflicting_quotes: list[str] = Field(default_factory=list)
+    conflict_reason: str | None = None
+
+    @model_validator(mode="after")
+    def normalize_fields(self) -> "StageElementAssessment":
+        self.stage_key = _normalize_text(self.stage_key)
+        self.conflict_type = _normalize_text(self.conflict_type) or None
+        self.conflict_types = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.conflict_types if _normalize_text(item)]
+        )
+        self.conflicting_element_ids = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.conflicting_element_ids if _normalize_text(item)]
+        )
+        self.conflicting_evidence_ids = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.conflicting_evidence_ids if _normalize_text(item)]
+        )
+        self.conflicting_quotes = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.conflicting_quotes if _normalize_text(item)]
+        )
+        self.conflict_reason = _normalize_text(self.conflict_reason) or None
+        return self
+
+
+class EvidencePipelineCounters(BaseModel):
+    retrieved_candidate_count: int = Field(default=0, ge=0)
+    accepted_quote_count: int = Field(default=0, ge=0)
+    grounded_quote_count: int = Field(default=0, ge=0)
+    element_supported_quote_count: int = Field(default=0, ge=0)
+    required_element_count: int = Field(default=0, ge=0)
+    element_coverage_ratio: float = Field(default=0.0, ge=0.0)
+    quote_element_disagreement: bool = False
 
 
 class EvaluationV3ResultRow(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     deliverable_id: str
-    final_label: ComplianceLabel | None = None
+    quote_label: ComplianceLabel | None = None
     stage_1_label: ComplianceLabel | None = None
     stage_2_label: ComplianceLabel | None = None
     stage_3_label: ComplianceLabel | None = None
@@ -251,6 +388,9 @@ class EvaluationV3ResultRow(BaseModel):
     stage_1_grounded_evidence_count: int = Field(default=0, ge=0)
     stage_2_grounded_evidence_count: int = Field(default=0, ge=0)
     stage_3_grounded_evidence_count: int = Field(default=0, ge=0)
+    stage_1_evidence_pipeline: EvidencePipelineCounters = Field(default_factory=EvidencePipelineCounters)
+    stage_2_evidence_pipeline: EvidencePipelineCounters = Field(default_factory=EvidencePipelineCounters)
+    stage_3_evidence_pipeline: EvidencePipelineCounters = Field(default_factory=EvidencePipelineCounters)
     stage_1_evidence_coverage_ratio: float = Field(default=0.0, ge=0.0)
     stage_2_evidence_coverage_ratio: float = Field(default=0.0, ge=0.0)
     stage_3_evidence_coverage_ratio: float = Field(default=0.0, ge=0.0)
@@ -258,13 +398,51 @@ class EvaluationV3ResultRow(BaseModel):
     grounded_evidence_count: int = Field(default=0, ge=0)
     grounded_chunk_count: int = Field(default=0, ge=0)
     required_evidence_count: int = Field(default=1, ge=0)
+    required_element_count: int = Field(default=0, ge=0)
+    supported_element_count: int = Field(default=0, ge=0)
+    missing_element_count: int = Field(default=0, ge=0)
+    contradicted_element_count: int = Field(default=0, ge=0)
+    weak_match_element_count: int = Field(default=0, ge=0)
+    total_conflict_findings: int = Field(default=0, ge=0)
+    conflicted_element_ids: list[str] = Field(default_factory=list)
+    final_element_coverage_ratio: float = Field(default=0.0, ge=0.0)
+    stage_1_element_coverage_ratio: float = Field(default=0.0, ge=0.0)
+    stage_2_element_coverage_ratio: float = Field(default=0.0, ge=0.0)
+    stage_3_element_coverage_ratio: float = Field(default=0.0, ge=0.0)
     evidence_coverage_ratio: float = Field(default=0.0, ge=0.0)
+    requirement_elements: list[RequirementElement] = Field(default_factory=list)
+    stage_1_element_assessment: StageElementAssessment | None = None
+    stage_2_element_assessment: StageElementAssessment | None = None
+    stage_3_element_assessment: StageElementAssessment | None = None
+    final_element_assessment: StageElementAssessment | None = None
+    conflict_count: int = Field(default=0, ge=0)
+    conflict_type: str | None = None
+    conflict_types: list[str] = Field(default_factory=list)
+    conflicting_element_ids: list[str] = Field(default_factory=list)
+    conflicting_evidence_ids: list[str] = Field(default_factory=list)
+    conflicting_quotes: list[str] = Field(default_factory=list)
+    conflict_reason: str | None = None
     has_conflict: bool = False
     contradiction_type: ContradictionType = "none"
+    evidence_audit_status: EvidenceAuditStatus = "missing"
 
     @model_validator(mode="after")
     def normalize_fields(self) -> "EvaluationV3ResultRow":
         self.deliverable_id = _normalize_text(self.deliverable_id)
+        self.conflict_type = _normalize_text(self.conflict_type) or None
+        self.conflict_types = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.conflict_types if _normalize_text(item)]
+        )
+        self.conflicting_element_ids = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.conflicting_element_ids if _normalize_text(item)]
+        )
+        self.conflicting_evidence_ids = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.conflicting_evidence_ids if _normalize_text(item)]
+        )
+        self.conflicting_quotes = _dedupe_preserve_order(
+            [_normalize_text(item) for item in self.conflicting_quotes if _normalize_text(item)]
+        )
+        self.conflict_reason = _normalize_text(self.conflict_reason) or None
         return self
 
 
@@ -277,7 +455,7 @@ class EvaluationV3Result(BaseModel):
     compliance_provider: str = ""
     compliance_model: str = ""
     method: str = ""
-    metrics: dict[str, int | float] = Field(default_factory=dict)
+    metrics: dict[str, int | float | dict[str, int]] = Field(default_factory=dict)
     units: list[EvaluationV3ResultRow] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -309,6 +487,11 @@ class EvaluationUnit(BaseModel):
     stage_1_answer: StageJudgment = Field(default_factory=lambda: StageJudgment(stage_key="stage_1"))
     stage_2_answer: StageJudgment = Field(default_factory=lambda: StageJudgment(stage_key="stage_2"))
     stage_3_answer: StageJudgment = Field(default_factory=lambda: StageJudgment(stage_key="stage_3"))
+    requirement_elements: list[RequirementElement] = Field(default_factory=list)
+    stage_1_element_assessment: StageElementAssessment | None = None
+    stage_2_element_assessment: StageElementAssessment | None = None
+    stage_3_element_assessment: StageElementAssessment | None = None
+    final_element_assessment: StageElementAssessment | None = None
     final_label: ComplianceLabel | None = None
     final_rationale: str = ""
     mini_kg_links: MiniKGLinks | None = None

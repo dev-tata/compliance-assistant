@@ -37,7 +37,7 @@ from app.services.document_service import (
     validate_extension,
 )
 from app.services.evaluation_v3_service import EVALUATION_V3_RUNTIME_DIR
-from app.services.retrieval.record_index_service import ensure_record_index
+from app.services.retrieval.record_index_service import ensure_record_index, get_record_index_dir
 from app.services.retrieval.reference_index_service import get_reference_index_dir, load_reference_chunks
 from app.services.storage_paths import get_case_dir
 
@@ -296,6 +296,7 @@ def _copy_case_outputs(*, compliance_saved_at: str, run_dir: Path, target_dir: P
     compliance_result_path = BACKEND_DIR / compliance_saved_at
     result_path = run_dir / "evaluation_v3_result.json"
     summary_path = run_dir / "evaluation_v3_summary.json"
+    retrieval_debug_path = run_dir / "evaluation_v3_retrieval_debug.json"
     debug_json_path = next(run_dir.glob("*_debug.json"), None)
     debug_csv_path = next(run_dir.glob("*_debug.csv"), None)
     if not result_path.exists():
@@ -311,11 +312,61 @@ def _copy_case_outputs(*, compliance_saved_at: str, run_dir: Path, target_dir: P
     shutil.copy2(compliance_result_path, copied_compliance_path)
     shutil.copy2(result_path, copied_result_path)
     shutil.copy2(summary_path, copied_summary_path)
+    if retrieval_debug_path.exists():
+        shutil.copy2(retrieval_debug_path, target_dir / "evaluation_v3_retrieval_debug.json")
     if debug_json_path and debug_json_path.exists():
         shutil.copy2(debug_json_path, target_dir / "evaluation_v3_debug.json")
     if debug_csv_path and debug_csv_path.exists():
         shutil.copy2(debug_csv_path, target_dir / "evaluation_v3_debug.csv")
     return copied_result_path, copied_summary_path
+
+
+def _copy_record_index_debug_artifacts(
+    *,
+    record_document: DocumentRecord,
+    target_dir: Path,
+) -> None:
+    debug_dir = target_dir / "record_index_debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    index_dir = get_record_index_dir(
+        {
+            "content_hash": record_document.content_hash,
+            "stored_filename": record_document.stored_filename,
+        }
+    )
+
+    meta_path = index_dir / "meta.json"
+    chunks_path = index_dir / "chunks.json"
+    if meta_path.exists():
+        shutil.copy2(meta_path, debug_dir / "meta.json")
+    if chunks_path.exists():
+        shutil.copy2(chunks_path, debug_dir / "chunks.json")
+
+    parsed_json_path = Path(str(record_document.parsed_json_at or "")).expanduser()
+    if parsed_json_path.exists():
+        shutil.copy2(parsed_json_path, debug_dir / "parsed_record.json")
+        try:
+            parsed_payload = json.loads(parsed_json_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            parsed_payload = {}
+        parsed_metadata = {
+            "parsed_json_path": parsed_json_path.as_posix(),
+            "source_filename": record_document.source_filename,
+            "stored_filename": record_document.stored_filename,
+            "content_hash": record_document.content_hash,
+            "parse_metadata": parsed_payload.get("metadata"),
+            "section_count": len(parsed_payload.get("sections", []) or []),
+            "section_headings": [
+                str(section.get("heading_title") or "").strip()
+                for section in (parsed_payload.get("sections", []) or [])
+                if str(section.get("heading_title") or "").strip()
+            ],
+        }
+        (debug_dir / "parsed_record_metadata.json").write_text(
+            json.dumps(parsed_metadata, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
 
 def _cleanup_registered_documents(stored_filenames: list[str]) -> None:
@@ -341,22 +392,60 @@ def _write_aggregate_summary(
     total_satisfied = 0
     total_partial = 0
     total_not_satisfied = 0
+    total_requirements_with_conflict = 0
+    total_conflict_findings = 0
+    total_required_elements = 0
+    total_supported_elements = 0
+    total_missing_elements = 0
+    total_contradicted_elements = 0
+    total_weak_match_elements = 0
     coverage_values: list[float] = []
     grounded_values: list[float] = []
+    requirements_by_conflict_type: dict[str, int] = {}
+    conflict_findings_by_type: dict[str, int] = {}
+    records_with_conflicts: list[str] = []
 
     for summary_path in summary_paths:
         payload = json.loads(summary_path.read_text(encoding="utf-8"))
         total_satisfied += int(payload.get("satisfied") or 0)
         total_partial += int(payload.get("partial") or 0)
         total_not_satisfied += int(payload.get("not_satisfied") or 0)
+        total_requirements_with_conflict += int(payload.get("requirements_with_conflict") or 0)
+        total_conflict_findings += int(payload.get("total_conflict_findings") or 0)
+        total_required_elements += int(payload.get("total_required_elements") or 0)
+        total_supported_elements += int(payload.get("total_supported_elements") or 0)
+        total_missing_elements += int(payload.get("total_missing_elements") or 0)
+        total_contradicted_elements += int(payload.get("total_contradicted_elements") or 0)
+        total_weak_match_elements += int(payload.get("total_weak_match_elements") or 0)
         coverage_values.append(float(payload.get("avg_evidence_coverage") or 0.0))
         grounded_values.append(float(payload.get("avg_grounded_evidence") or 0.0))
+        
+        for conflict_type, count in (payload.get("requirements_by_conflict_type") or {}).items():
+            requirements_by_conflict_type[conflict_type] = requirements_by_conflict_type.get(conflict_type, 0) + int(count)
+        for conflict_type, count in (payload.get("conflict_findings_by_type") or {}).items():
+            conflict_findings_by_type[conflict_type] = conflict_findings_by_type.get(conflict_type, 0) + int(count)
+        
+        # Track records with conflicts
+        if int(payload.get("requirements_with_conflict") or 0) > 0:
+            # Extract record_id from the summary path (e.g., /path/to/record_001/evaluation_v3_summary.json)
+            record_id = summary_path.parent.name
+            records_with_conflicts.append(record_id)
 
     aggregate_payload = {
         "total_cases": len(summary_paths),
         "total_satisfied": total_satisfied,
         "total_partial": total_partial,
         "total_not_satisfied": total_not_satisfied,
+        "total_requirements_with_conflict": total_requirements_with_conflict,
+        "total_conflict_findings": total_conflict_findings,
+        "total_required_elements": total_required_elements,
+        "total_supported_elements": total_supported_elements,
+        "total_missing_elements": total_missing_elements,
+        "total_contradicted_elements": total_contradicted_elements,
+        "total_weak_match_elements": total_weak_match_elements,
+        "requirements_by_conflict_type": requirements_by_conflict_type,
+        "conflict_findings_by_type": conflict_findings_by_type,
+        "records_with_conflicts": records_with_conflicts,
         "avg_coverage": round(sum(coverage_values) / len(coverage_values), 4) if coverage_values else 0.0,
         "avg_grounded_evidence": (
             round(sum(grounded_values) / len(grounded_values), 4) if grounded_values else 0.0
@@ -533,6 +622,10 @@ def main() -> None:
                 _, copied_summary_path = _copy_case_outputs(
                     compliance_saved_at=response.saved_at,
                     run_dir=evaluation_run_dir,
+                    target_dir=target_dir,
+                )
+                _copy_record_index_debug_artifacts(
+                    record_document=record_document,
                     target_dir=target_dir,
                 )
                 copied_summary_paths.append(copied_summary_path)
