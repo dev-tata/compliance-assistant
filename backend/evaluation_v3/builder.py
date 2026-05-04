@@ -10,6 +10,7 @@ from .schemas import (
     ContradictionType,
     DeliverableNode,
     EvidencePipelineCounters,
+    EvidenceRef,
     QuoteElementMappingDebug,
     EVALUATION_V3_ANALYSIS_METRICS,
     EvaluationV3Result,
@@ -562,8 +563,20 @@ def _build_placeholder_stage_element_assessment(
             grounded_record_evidence_items=grounded_record_evidence_items,
             grounded_record_nodes=grounded_record_nodes,
         ) if element.required else None
-        supporting_quotes, supporting_ids = _extract_quote_evidence_links(mapped_items)
-        conflicting_quotes, conflicting_ids = _extract_quote_evidence_links((conflict_details or {}).get("items", []))
+        
+        supporting_refs = _build_evidence_refs(items=mapped_items, element_id=element.element_id)
+        conflicting_refs = _build_evidence_refs(
+            items=(conflict_details or {}).get("items", []),
+            element_id=element.element_id,
+            conflict_type=(conflict_details or {}).get("conflict_type"),
+            conflict_reason=(conflict_details or {}).get("conflict_reason"),
+        )
+        # Derive arrays from refs for status determination
+        supporting_quotes = [ref.quote for ref in supporting_refs]
+        supporting_ids = [ref.evidence_id for ref in supporting_refs]
+        conflicting_quotes = [ref.quote for ref in conflicting_refs]
+        conflicting_ids = [ref.evidence_id for ref in conflicting_refs]
+        
         has_detected_conflict = bool(conflicting_ids or conflicting_quotes)
         if conflict_flag or has_detected_conflict:
             element_status = "contradicted"
@@ -573,19 +586,35 @@ def _build_placeholder_stage_element_assessment(
             element_status = "weak_match"
         else:
             element_status = "missing"
+        
+        # For weak_match, include all grounded items that didn't support or conflict
+        weak_match_items = []
+        if element.required and element_status == "weak_match":
+            # Find items that are grounded but not in supporting or conflicting
+            supporting_quote_set = set(supporting_quotes)
+            conflicting_quote_set = set(conflicting_quotes)
+            for item in grounded_record_evidence_items:
+                quote = str(item.get("text") or "").strip()
+                if quote and quote not in supporting_quote_set and quote not in conflicting_quote_set:
+                    weak_match_items.append(item)
+        weak_match_refs = _build_evidence_refs(
+            items=weak_match_items,
+            element_id=element.element_id,
+            weak_match_reason="available_evidence_did_not_support_element"
+        )
+        
         elements.append(
             RequirementElementSupport(
                 element_id=element.element_id,
                 element_text=element.element_text,
                 element_type=element.element_type,
                 required=element.required,
-                supporting_evidence_ids=supporting_ids,
-                supporting_quotes=supporting_quotes,
+                supporting_evidence_refs=supporting_refs,
+                conflicting_evidence_refs=conflicting_refs,
+                weak_match_evidence_refs=weak_match_refs,
                 element_status=element_status if element.required else "missing",
                 has_conflict=conflict_flag or has_detected_conflict,
                 conflict_types=[(conflict_details or {}).get("conflict_type")] if (conflict_details or {}).get("conflict_type") else [],
-                conflicting_evidence_ids=conflicting_ids,
-                conflicting_quotes=conflicting_quotes,
                 conflict_reasons=[(conflict_details or {}).get("conflict_reason")] if (conflict_details or {}).get("conflict_reason") else [],
             )
         )
@@ -836,7 +865,40 @@ def _map_grounded_quotes_to_requirement_element(
     return matched_items
 
 
-def _extract_quote_evidence_links(items: Sequence[dict[str, Any]]) -> tuple[list[str], list[str]]:
+def _build_evidence_refs(
+    *,
+    items: Sequence[dict[str, Any]],
+    element_id: str,
+    conflict_type: str | None = None,
+    conflict_reason: str | None = None,
+    weak_match_reason: str | None = None,
+) -> list[EvidenceRef]:
+    refs = []
+    seen_keys = set()
+    for item in items:
+        quote_text = str(item.get("text") or "").strip()
+        evidence_id = str(item.get("evidence_id") or "").strip()
+        if not quote_text:
+            continue
+        # Avoid duplicates based on evidence_id + quote + element_id
+        key = (evidence_id, quote_text, element_id)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        refs.append(EvidenceRef(
+            evidence_id=evidence_id,
+            quote=quote_text,
+            source_stage=str(item.get("source_stage") or "").strip(),
+            section_id=str(item.get("section_id") or "").strip(),
+            subsection_id=str(item.get("subsection_id") or "").strip(),
+            heading_title=str(item.get("heading_title") or "").strip(),
+            source_document=str(item.get("source_document") or "").strip(),
+            element_id=element_id,
+            conflict_type=conflict_type,
+            conflict_reason=conflict_reason,
+            weak_match_reason=weak_match_reason,
+        ))
+    return refs
     linked_pairs: list[tuple[str, str]] = []
     seen_quotes: set[str] = set()
     for item in items:
@@ -1649,6 +1711,7 @@ def build_debug_report_rows(units: Sequence[EvaluationUnit]) -> list[dict[str, A
             "grounded_chunk_count": _resolve_debug_grounded_chunk_count(unit),
             "grounded_subsection_count": len(_resolve_debug_grounded_subsection_ids(unit)),
             "has_conflict": _resolve_debug_has_conflict(unit),
+            "total_conflict_findings": _resolve_element_conflict_count(unit.final_element_assessment),
             "subsection_count": len(_resolve_debug_subsection_ids(unit)),
             "subsection_ids": _resolve_debug_subsection_ids(unit),
             "subsection_coverage_ratio": _resolve_debug_subsection_coverage_ratio(unit),

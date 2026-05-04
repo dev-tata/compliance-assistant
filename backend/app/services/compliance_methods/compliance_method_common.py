@@ -131,6 +131,8 @@ def execute_compliance_method(
         method=method,
         expected_count=len(deliverables),
         allowed_record_documents=allowed_record_documents,
+        model_name=llm_service.model,
+        stage_name=method,
     )
     analysis = enrich_analysis_for_scoring(
         analysis,
@@ -572,11 +574,30 @@ def parse_compliance_analysis_response(
     method: str,
     expected_count: int,
     allowed_record_documents: set[str] | None = None,
+    model_name: str | None = None,
+    stage_name: str | None = None,
 ) -> ComplianceAnalysis:
     try:
         analysis = ComplianceAnalysis(**extract_json_object(raw_analysis))
     except (ValidationError, ValueError) as exc:
-        raise LLMGenerationError(f"Invalid compliance response from model: {exc}") from exc
+        error_message = str(exc)
+        diagnostic_parts: list[str] = []
+        if stage_name:
+            diagnostic_parts.append(f"stage={stage_name}")
+        else:
+            diagnostic_parts.append(f"stage={method}")
+        if model_name:
+            diagnostic_parts.append(f"model={model_name}")
+
+        llm_error = LLMGenerationError(
+            f"Invalid compliance response from model: {error_message}; {' '.join(diagnostic_parts)}"
+        )
+        llm_error.raw_response = raw_analysis
+        llm_error.stage_name = stage_name or method
+        llm_error.model_name = model_name
+        if hasattr(exc, "parse_debug"):
+            llm_error.parse_debug = exc.parse_debug
+        raise llm_error from exc
     return normalize_compliance_analysis(
         analysis=analysis,
         method=method,

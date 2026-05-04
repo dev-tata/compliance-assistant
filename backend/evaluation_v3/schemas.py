@@ -267,6 +267,37 @@ class RequirementElement(BaseModel):
         return self
 
 
+class EvidenceRef(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    evidence_id: str
+    quote: str
+    source_stage: str
+    section_id: str = ""
+    subsection_id: str = ""
+    heading_title: str = ""
+    source_document: str = ""
+    element_id: str
+    conflict_type: str | None = None
+    conflict_reason: str | None = None
+    weak_match_reason: str | None = None
+
+    @model_validator(mode="after")
+    def normalize_fields(self) -> "EvidenceRef":
+        self.evidence_id = _normalize_text(self.evidence_id)
+        self.quote = _normalize_text(self.quote)
+        self.source_stage = _normalize_text(self.source_stage)
+        self.section_id = _normalize_text(self.section_id)
+        self.subsection_id = _normalize_text(self.subsection_id)
+        self.heading_title = _normalize_text(self.heading_title)
+        self.source_document = _normalize_text(self.source_document)
+        self.element_id = _normalize_text(self.element_id)
+        self.conflict_type = _normalize_text(self.conflict_type) or None
+        self.conflict_reason = _normalize_text(self.conflict_reason) or None
+        self.weak_match_reason = _normalize_text(self.weak_match_reason) or None
+        return self
+
+
 class RequirementElementSupport(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -276,12 +307,15 @@ class RequirementElementSupport(BaseModel):
     required: bool = True
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     supporting_quotes: list[str] = Field(default_factory=list)
+    supporting_evidence_refs: list[EvidenceRef] = Field(default_factory=list)
     element_status: ElementStatus = "missing"
     has_conflict: bool = False
     conflict_types: list[str] = Field(default_factory=list)
     conflicting_evidence_ids: list[str] = Field(default_factory=list)
     conflicting_quotes: list[str] = Field(default_factory=list)
+    conflicting_evidence_refs: list[EvidenceRef] = Field(default_factory=list)
     conflict_reasons: list[str] = Field(default_factory=list)
+    weak_match_evidence_refs: list[EvidenceRef] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def normalize_fields(self) -> "RequirementElementSupport":
@@ -306,6 +340,13 @@ class RequirementElementSupport(BaseModel):
         self.conflict_reasons = _dedupe_preserve_order(
             [_normalize_text(item) for item in self.conflict_reasons if _normalize_text(item)]
         )
+        # Derive existing arrays from refs for compatibility
+        if self.supporting_evidence_refs:
+            self.supporting_quotes = _dedupe_preserve_order([ref.quote for ref in self.supporting_evidence_refs])
+            self.supporting_evidence_ids = _dedupe_preserve_order([ref.evidence_id for ref in self.supporting_evidence_refs])
+        if self.conflicting_evidence_refs:
+            self.conflicting_quotes = _dedupe_preserve_order([ref.quote for ref in self.conflicting_evidence_refs])
+            self.conflicting_evidence_ids = _dedupe_preserve_order([ref.evidence_id for ref in self.conflicting_evidence_refs])
         return self
 
 

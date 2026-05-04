@@ -68,6 +68,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--record-language", choices=("en", "sv", "mixed"), default="en")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--run-id", default=None)
+    parser.add_argument(
+        "--record-ids",
+        nargs="*",
+        default=None,
+        help="Optional list of record IDs to run (e.g. 021 064 091 or record_021).",
+    )
     parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT_DEFAULT)
     return parser.parse_args()
 
@@ -461,19 +467,41 @@ def _write_aggregate_summary(
 
 def _write_error_payload(*, target_dir: Path, record_id: str, error: Exception) -> Path:
     target_dir.mkdir(parents=True, exist_ok=True)
+    error_payload: dict[str, Any] = {
+        "record_id": record_id,
+        "error_type": type(error).__name__,
+        "error_message": str(error),
+    }
+    raw_response = getattr(error, "raw_response", None)
+    parse_debug = getattr(error, "parse_debug", None)
+    stage_name = getattr(error, "stage_name", None)
+    model_name = getattr(error, "model_name", None)
+
+    if stage_name:
+        error_payload["stage_name"] = stage_name
+    if model_name:
+        error_payload["model_name"] = model_name
+    if parse_debug is not None:
+        error_payload["parse_debug"] = parse_debug
+
+    if raw_response is not None:
+        raw_path = target_dir / "raw_llm_response.txt"
+        raw_path.write_text(raw_response, encoding="utf-8")
+        error_payload["raw_response_path"] = raw_path.name
+
     error_path = target_dir / "error.json"
     error_path.write_text(
-        json.dumps(
-            {
-                "record_id": record_id,
-                "error_type": type(error).__name__,
-                "error_message": str(error),
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
+        json.dumps(error_payload, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
+    if parse_debug is not None:
+        debug_path = target_dir / "parse_debug.json"
+        debug_path.write_text(
+            json.dumps(parse_debug, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     return error_path
 
 
@@ -508,25 +536,52 @@ def _load_record_inputs_from_catalog(
     return inputs
 
 
+def _normalize_record_id_selector(value: str) -> str:
+    cleaned = value.strip().lower()
+    if cleaned.startswith("record_"):
+        return cleaned
+    if cleaned.isdigit():
+        return f"record_{int(cleaned):03d}"
+    return cleaned
+
+
 def _resolve_record_inputs(
     *,
     record_paths: list[Path],
     records_catalog: Path,
     limit: int | None,
+    record_ids: list[str] | None = None,
 ) -> list[RecordInput]:
     if record_paths:
         selected_paths = record_paths[:limit] if limit is not None else record_paths
-        return [
+        inputs = [
             RecordInput(
                 path=record_path,
                 record_id=_batch_record_id(index),
             )
             for index, record_path in enumerate(selected_paths, start=1)
         ]
-    return _load_record_inputs_from_catalog(
-        catalog_path=records_catalog,
-        limit=limit,
-    )
+    else:
+        inputs = _load_record_inputs_from_catalog(
+            catalog_path=records_catalog,
+            limit=limit,
+        )
+
+    if record_ids:
+        normalized_ids = {
+            _normalize_record_id_selector(value)
+            for value in record_ids
+        }
+        inputs = [
+            input_item
+            for input_item in inputs
+            if _normalize_record_id_selector(input_item.record_id) in normalized_ids
+        ]
+        if not inputs:
+            raise RuntimeError(
+                f"No matching records found for --record-ids={record_ids}."
+            )
+    return inputs
 
 
 def main() -> None:
@@ -542,6 +597,7 @@ def main() -> None:
         record_paths=args.record_path,
         records_catalog=args.records_catalog,
         limit=args.limit,
+        record_ids=args.record_ids,
     )
 
     procedure_document, created_procedure = _register_or_reuse_document(

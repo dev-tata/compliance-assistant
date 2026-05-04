@@ -68,6 +68,8 @@ def evaluate_non_rag_analysis(
             method="non_rag",
             expected_count=len(case_payload.get("deliverables", [])),
             allowed_record_documents=extract_allowed_record_documents(case_payload),
+            model_name=llm_service.model,
+            stage_name="non_rag",
         )
     except LLMGenerationError as exc:
         raise LLMGenerationError(f"Invalid non_rag baseline response: {exc}") from exc

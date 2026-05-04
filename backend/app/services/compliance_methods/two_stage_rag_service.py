@@ -206,6 +206,8 @@ def _run_stage_1_non_rag(
         method="non_rag",
         expected_count=len(deliverables),
         allowed_record_documents=allowed_record_documents,
+        model_name=llm_service.model,
+        stage_name=STAGE_1_KEY,
     )
     validated_findings = [
         verify_finding_against_full_record_sections(
@@ -275,6 +277,8 @@ def _run_stage_2_record_retrieval(
         raw_analysis=llm_service.generate(prompt, temperature=0.0),
         method="record_retrieval_stage",
         expected_count=len(deliverables),
+        model_name=llm_service.model,
+        stage_name=STAGE_2_KEY,
     )
     analysis = _normalize_retrieval_stage_analysis(
         candidate_analysis=raw_analysis,
@@ -336,6 +340,8 @@ def _run_stage_3_reference_retrieval(
         raw_analysis=llm_service.generate(prompt, temperature=0.0),
         method="two_stage_rag",
         expected_count=len(deliverables),
+        model_name=llm_service.model,
+        stage_name=STAGE_3_KEY,
     )
     candidate_analysis = _normalize_retrieval_stage_analysis(
         candidate_analysis=raw_analysis,
