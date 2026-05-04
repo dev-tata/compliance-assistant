@@ -1,10 +1,10 @@
-# OS / editor
+# OS / Editor files
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
 
-# Local environment files
+# Environment and secrets
 .env
 *.env
 !.env.example
@@ -32,36 +32,35 @@ build/
 venv/
 env/
 
-# Backend-generated data
-backend/storage/
-
-# Evaluation folder (not shared, contains large files)
-backend/evaluation_v3/cache/
-backend/evaluation_v3/manual_comparisons/
-backend/evaluation_v3/output/
-backend/evaluation_v3/runs/
-backend/evaluation_v3/__pycache__/
-backend/evaluation_v3/__init__.py
-backend/evaluation_v3/README.md
-backend/evaluation_runs/
-backend/tests/
-
-# Frontend / Node
-frontend/node_modules/
-frontend/dist/
-frontend/*.tsbuildinfo
-frontend/**/*.tsbuildinfo
-
-# Generated config artifacts
-frontend/vite.config.js
-frontend/vite.config.d.ts
-
-# Logs
-*.log
+# Node.js / Frontend
+node_modules/
+dist/
+*.tsbuildinfo
+**/*.tsbuildinfo
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Project data
+# Logs
+*.log
+
+# Project data and storage
+storage/
 synthetic_data/
 original_data/
+
+# Evaluation data (large files, not shared)
+backend/evaluation_v3/cache/
+backend/evaluation_v3/cache_original/
+backend/evaluation_v3/manual_comparisons/
+backend/evaluation_v3/output/
+backend/evaluation_v3/runs/
+backend/evaluation_runs/
+backend/result_visualization/
+
+# Tests
+backend/tests/
+
+# Generated config artifacts
+frontend/vite.config.js
+frontend/vite.config.d.ts
