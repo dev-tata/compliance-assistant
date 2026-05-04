@@ -64,3 +64,4 @@ yarn-error.log*
 
 # Project data
 synthetic_data/
+original_data/
